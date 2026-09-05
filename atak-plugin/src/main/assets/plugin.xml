@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<plugin>
+    <extension type="gov.tak.api.plugin.IPlugin"
+        impl="com.hardlinelabs.relay.atak.plugin.RelayPlugin" singleton="true"/>
+</plugin>

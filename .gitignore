@@ -1,5 +1,6 @@
 .gradle/
 .kotlin/
+.takdev/
 **/build/
 local.properties
 .idea/

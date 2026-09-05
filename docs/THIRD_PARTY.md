@@ -17,6 +17,11 @@ The official plugin's extra encryption feature is reference material only.
 The Gradle wrapper was sourced from the pinned plugin checkout; its scripts carry
 Gradle's Apache-2.0 notice. Dependency artifacts retain their packaged notices.
 The standalone ATAK harness does not link against an ATAK SDK.
+The optional :atak-plugin module compiles against the local official SDK 5.6.0.23
+without packaging main.jar. Its development signature matches the bundled SDK
+host. The SDK license, public test keystore and binaries stay local; no SDK files
+are uploaded to GitHub or shared with CI. Review the included license before any
+redistribution. The development build makes no production signing claim.
 
 ATAK SDK and plugin signing resources: https://tak.gov/products/atak-civ
 Official public source: https://github.com/TAK-Product-Center/atak-civ
