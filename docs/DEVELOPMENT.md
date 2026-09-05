@@ -28,6 +28,7 @@ payloads, channel URLs, QR images, or keys in routine diagnostics.
 `./tools/start-emulator.ps1` starts Hardline_Relay_API34 after the hypervisor
 is enabled and Windows has restarted. Then use `./tools/check.ps1 -Connected`.
 The emulator tests Android UI/lifecycle; it does not emulate Bluetooth LoRa radios.
+For the actual SDK-host plugin build and install, use ../atak-plugin/README.md.
 
 ## Build outputs
 

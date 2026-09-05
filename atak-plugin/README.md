@@ -1,16 +1,38 @@
 # ATAK host integration
 
-Target API: ATAK CIV 5.6.0. The exact matching SDK and development host APK must
-be obtained from TAK.gov before this module is configured and verified.
-The repository's :app module is a standalone display harness, not an ATAK plugin.
+Target API: ATAK CIV 5.6.0. Exact SDK/host: 5.6.0.23 (51b827db),
+host versionCode 1786740347. The workstation inventory owns the archive pin.
 
-Next integration steps (after the SDK is available):
-1. Freeze the exact SDK archive, host APK, and SHA-256 digests in the version inventory.
-2. Use the matching SDK's plugin template and takdev Gradle plugin. Do not substitute 5.5 jars.
-3. Implement the host toolbar/pane lifecycle, with the tested :core StatusPresenter.
-4. Bind the host's supported Context to Meshtastic 2.7.13 IMeshService for read-only status.
-5. Test loading with the SDK host. Production ATAK may require plugin signing through TAK.gov.
-6. Keep normal TAK server connections untouched. No automatic CoT forwarding in the setup baseline.
+`./tools/build-atak.ps1` verifies local SDK hashes, opts into :atak-plugin,
+then builds and lints the CIV debug APK. This passes locally. Host discovery,
+loading, toolbar/pane lifecycle and radio binding are not yet verified.
+Normal CI builds only :app (the standalone simulation) and :core; it never
+uploads or downloads the restricted SDK.
 
-No placeholder APK is presented as ATAK-compatible. tools/build-atak.ps1 fails
-explicitly until the matching SDK integration is ready.
+The official build plugin uses offline SDK mode. No TAK account credentials
+are needed. The SDK's publicly supplied test keystore/password is only for
+the bundled SDK host, never a production identity. Release variants are disabled.
+Keep SDK jars, APK, keystore, guide and licenses outside Git; do not redistribute
+the SDK or commit its sample tree. Our entry point uses the public plugin API.
+
+## Local SDK host test
+
+After the emulator boots or exactly two authorized development phones are connected:
+
+1. Run `./tools/build-atak.ps1`.
+2. Install the SDK host with `./tools/devices.ps1 install --apk "C:/Users/Aj/HardlineRelayDev/references/ATAK-CIV-5.6.0.23-SDK/ATAK-CIV-5.6.0.23-SDK/atak.apk"`.
+3. Install the plugin with `./tools/devices.ps1 install --apk atak-plugin/build/outputs/apk/civ/debug/atak-plugin-civ-debug.apk`.
+4. Open ATAK, complete local permission/onboarding prompts, enable Hardline Relay
+   in Plugins, then open its toolbar item. Confirm the development disclaimer.
+5. Close/reopen its pane and restart ATAK. Check that normal TAK connections remain
+   untouched. Add read-only Meshtastic AIDL binding only after this baseline works.
+
+For one emulator append `--allow-emulator --serial emulator-5554 --count 1`,
+using the actual serial from `./tools/devices.ps1 list`.
+Never silently uninstall a production ATAK installation to change signing identities.
+The generic `devices.ps1 test` runs the standalone harness tests, not ATAK-host tests.
+
+TAK.gov is informational/manual-download-only. Uploads, signing requests, support
+contact, account changes or any other submissions need explicit creator approval.
+If the SDK is missing, have the creator download the pinned ZIP manually from
+ATAK-CIV 5.6 > Developer Resources. Do not automate or bypass its download block.

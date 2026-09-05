@@ -13,10 +13,10 @@ The current standalone harness demonstrates status presentation with fake radio
 and TAK-server states. It never connects to a radio or an ATAK host. Its simulation
 labels must remain visible. A radio connection is not proof of mesh peer reachability.
 
-Use atak-plugin/README.md for the SDK gate. No 5.5 jar, dummy SDK, production
-signing claim, or harness APK can satisfy that gate. After obtaining 5.6:
-build the matching template, load it in the SDK host, add the tested presenter,
-then validate alongside the normal TAK server connection.
+The separate :atak-plugin module builds a minimal toolbar/pane entry point against
+the official local 5.6.0.23 SDK and uses the tested presenter. It has no radio
+binding yet. Follow atak-plugin/README.md for the remaining host-loading gate.
+No 5.5 jar, production signing claim or harness APK can satisfy that gate.
 
 CoT routing, position display, chat, airtime policy, duplicate suppression and
 real peer-reachability detection are later increments. Do not bridge TAK server

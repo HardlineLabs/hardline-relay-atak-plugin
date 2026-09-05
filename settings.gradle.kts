@@ -1,6 +1,8 @@
 pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
 dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    // The official local TAK build plugin adds its SDK flatDir repository.
+    repositoriesMode.set(if (providers.gradleProperty("withAtak").orNull == "true")
+        RepositoriesMode.PREFER_PROJECT else RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
         mavenCentral()
@@ -11,3 +13,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "HardlineRelay"
 include(":core", ":app")
+if (providers.gradleProperty("withAtak").orNull == "true") include(":atak-plugin")
