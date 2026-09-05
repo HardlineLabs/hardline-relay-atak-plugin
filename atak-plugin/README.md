@@ -5,7 +5,8 @@ host versionCode 1786740347. The workstation inventory owns the archive pin.
 
 `./tools/build-atak.ps1` verifies local SDK hashes, opts into :atak-plugin,
 then builds and lints the CIV debug APK. This passes locally. Host discovery,
-loading, toolbar/pane lifecycle and radio binding are not yet verified.
+loading and opening the development pane pass on the pinned API34 emulator
+with SwiftShader graphics. Radio binding is not implemented or tested yet.
 Normal CI builds only :app (the standalone simulation) and :core; it never
 uploads or downloads the restricted SDK.
 

@@ -15,8 +15,9 @@ labels must remain visible. A radio connection is not proof of mesh peer reachab
 
 The separate :atak-plugin module builds a minimal toolbar/pane entry point against
 the official local 5.6.0.23 SDK and uses the tested presenter. It has no radio
-binding yet. Follow atak-plugin/README.md for the remaining host-loading gate.
-No 5.5 jar, production signing claim or harness APK can satisfy that gate.
+binding yet. Discovery, loading and pane display pass in the pinned emulator host.
+Follow atak-plugin/README.md to repeat host checks on the actual phones.
+No production signing or real-radio compatibility is claimed by this baseline.
 
 CoT routing, position display, chat, airtime policy, duplicate suppression and
 real peer-reachability detection are later increments. Do not bridge TAK server

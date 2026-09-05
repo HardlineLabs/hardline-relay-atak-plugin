@@ -9,7 +9,8 @@ Run `./tools/check.ps1` from PowerShell. Open the IDE with `./tools/open-studio.
 `:app` builds a standalone, clearly labelled simulation harness. `:core` tests
 mesh status independently of TAK server connectivity. This APK is not an ATAK
 plugin. The real [ATAK host integration](atak-plugin/README.md) builds separately
-against the local official 5.6.0.23 SDK. Its host loading is not yet verified.
+against the local official 5.6.0.23 SDK. Host discovery, loading and development
+pane display are verified on the dedicated emulator; radio binding is not implemented.
 
 Versioned status vectors live in [protocol](protocol/README.md); the
 [Relay App repository](https://github.com/HardlineLabs/hardline-relay-app) owns
