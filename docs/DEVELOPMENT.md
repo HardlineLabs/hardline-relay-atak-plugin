@@ -1,8 +1,18 @@
 # Development
 
-Run commands from this repository in PowerShell 7. The workstation toolchain is
-owned by the umbrella workspace's operations/relay-workstation.md and
-tools/bootstrap-relay.ps1. Use that bootstrap on a replacement machine.
+Use PowerShell 7, Microsoft JDK 17.0.20.1+1, Android platform 36 revision 2,
+build-tools 36.0.0 and Python 3.13.15. Gradle's checked-in wrapper owns its version.
+Set JAVA_HOME and ANDROID_HOME (or an untracked local.properties SDK path), then run:
+
+```powershell
+./gradlew.bat :core:test :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest --console=plain
+python -m unittest discover -s tools -p 'test_*.py'
+```
+
+The workstation convenience scripts use HARDLINE_RELAY_DEV, defaulting to
+`$env:USERPROFILE/HardlineRelayDev`, with `tools/jdk-17.0.20.1+1` and `AndroidSdk`
+inside it. They do not download the restricted ATAK SDK. The workflow under
+.github/workflows/validate.yml records the public CI toolchain and download hashes.
 
 ## Daily loop
 
@@ -42,7 +52,7 @@ The daily install/test commands above target the standalone harness. For real
 ATAK work run `./tools/build-atak.ps1`, then install the explicit APK:
 
 ```powershell
-./tools/devices.ps1 install --apk atak-plugin/build/outputs/apk/civ/debug/atak-plugin-civ-debug.apk --serial ZL8326CMLX --serial ZL83257CQC --count 2
+./tools/devices.ps1 install --apk atak-plugin/build/outputs/apk/civ/debug/atak-plugin-civ-debug.apk --serial SERIAL_A --serial SERIAL_B --count 2
 ./tools/compare-contract.ps1 -OtherRepository '../Hardline Relay App'
 ```
 
@@ -50,12 +60,12 @@ ATAK work run `./tools/build-atak.ps1`, then install the explicit APK:
 
 1. Read PRODUCT.md for the evidence boundary. Verify both ADB devices, fixed
    versions, radio power/antennas, and Meshtastic Connected to the correct radio.
-   Keep LongFast/RelayTest and 7 hops unchanged. No channel recreation is needed.
+   Use the same verified profile on both radios, US LONG_FAST and seven hops.
 2. Open ATAK on each phone. Confirm precise location permission and a live GPS
    fix; window/outdoor placement was needed indoors. No mock positions or silent
    network-location fallback. Keep phone clocks automatic for fix-time checks.
 3. In ATAK Plugins, load Hardline Relay if necessary. Open Tools > Hardline Relay
-   and choose Use RelayTest on each. Verify radio IDs and Auto: Off.
+   and choose the same channel on each. Verify reporting is Off / Manual.
 4. Send one manual PLI from A. On B verify peer pane AND actual map marker/location,
    callsign, fix time and receipt age. On A require CONFIRMED for the matching
    token, attributed to B. Repeat B to A. Submitted alone is not acceptance.
@@ -74,12 +84,12 @@ Use live, narrowly filtered diagnostics. Android UI dumps may be staged at
 `/data/local/tmp/relay-diagnostic-ui.xml`, read, then immediately removed. Do not
 save location screenshots, Meshtastic packet logs, channel secrets or QR payloads.
 ATAK's map/toolbars are partly canvas-based; empty UI text is not proof of a crash.
-Check loading/screen wake state before interacting. Physical permission prompts
-are for the creator; do not reuse emulator-only provisioning on these phones.
+Check loading/screen wake state before interacting. Handle physical permission prompts on the phone; emulator provisioning is a
+separate workflow.
 
 ## Compact point acceptance
 
-Use 0.3.0-dev (3) on both SDK hosts. Verify the installed hash recorded in the
+Use 0.4.0 (4) on both SDK hosts. Verify the installed hash recorded in the
 workstation inventory; a version name alone is not sufficient during development.
 
 1. Keep both automatic PLI modes Off and select the existing private channel.
@@ -144,4 +154,5 @@ umbrella workspace, with links into these human-maintained documents.
 
 Work from current origin/develop on feature/<name>. Validate and push coherent
 commits, then merge through develop. main is reserved for an authorized release.
-There is no publication workflow in this scaffold.
+CI validates main, develop and feature branches. Source publication does not publish
+a production-signed APK or redistribute the ATAK SDK.

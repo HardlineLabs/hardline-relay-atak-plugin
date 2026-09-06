@@ -8,12 +8,13 @@ data class Pli(val id: Long, val fixTime: Long, val lat: Double, val lon: Double
                val interval: Int, val callsign: String)
 
 object PliWire {
+    val intervals = listOf(0, 10, 30, 60, 120, 300, 600)
     const val PORT = 256
     private const val MAGIC = 0x48525031 // HRP1
     fun encode(p: Pli): ByteArray {
         require(p.id != 0L && p.fixTime > 0 && p.lat.isFinite() && p.lon.isFinite())
         require(p.lat in -90.0..90.0 && p.lon in -180.0..180.0)
-        require(p.interval in listOf(0, 10, 30))
+        require(p.interval in intervals)
         val name = p.callsign.toByteArray(Charsets.UTF_8)
         require(name.size in 1..40 && p.callsign.none { it.isISOControl() })
         return ByteBuffer.allocate(35 + name.size).putInt(MAGIC).put(1).putLong(p.id)
@@ -55,21 +56,27 @@ class PliState {
         fun age(now: Long) = ((now - receivedAt).coerceAtLeast(0) / 1000)
         fun stale(now: Long) = now - receivedAt >= maxOf(60_000L, pli.interval * 3_000L)
     }
-    data class Sent(val id: Long, val at: Long, val receipts: MutableSet<String> = linkedSetOf())
+    data class Sent(val id: Long, val at: Long, val receipts: MutableSet<String> = linkedSetOf(), var failure: String? = null)
     val peers = linkedMapOf<String, Peer>()
     val pending = linkedMapOf<Long, Sent>()
+    var latest: Sent? = null
+        private set
+    var lastConfirmation = -1L
+        private set
     private val seen = linkedMapOf<String, Long>()
     fun sent(id: Long, now: Long) {
         expire(now)
         pending[id] = Sent(id, now)
+        latest = pending[id]
         while (pending.size > 32) pending.remove(pending.keys.first())
     }
     fun receipt(id: Long, from: String, now: Long): Boolean {
         expire(now)
         val sent = pending[id] ?: return false
         if (sent.receipts.size >= 32) return false
-        return sent.receipts.add(from)
+        return sent.receipts.add(from).also { if (it) { lastConfirmation = now; sent.failure = null } }
     }
+    fun failed(id: Long, reason: String) { pending[id]?.takeIf { it.receipts.isEmpty() }?.failure = reason }
     fun accept(from: String, p: Pli, now: Long, wall: Long): Boolean {
         expire(now)
         val key = "$from:${p.id}"
@@ -88,5 +95,5 @@ class PliState {
         seen.entries.removeAll { now - it.value > 300_000 }
         pending.entries.removeAll { now - it.value.at > 300_000 }
     }
-    fun clear() { peers.clear(); pending.clear(); seen.clear() }
+    fun clear() { peers.clear(); pending.clear(); seen.clear(); latest = null; lastConfirmation = -1 }
 }

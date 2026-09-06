@@ -10,8 +10,8 @@ class RadioSession<T> {
 
     private fun invalidateWork() { generation++; busy = false; queued = 0 }
     fun reset() { invalidateWork(); snapshot = null; selected = null }
-    fun select(index: Int) {
-        require(snapshot != null && index > 0)
+    fun select(index: Int?) {
+        require(index == null || (snapshot != null && index > 0))
         invalidateWork(); selected = index
     }
     /** True means the host must rebuild choices, including a connected-to-connected change. */

@@ -1,13 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
-    <queries><package android:name="com.geeksville.mesh" /></queries>
+    <queries><package android:name="com.geeksville.mesh" /><package android:name="com.hardlinelabs.relay" /><provider android:authorities="com.hardlinelabs.relay.profiles" /></queries>
     <!-- Runtime access belongs to ATAK host; the adapter checks its permission. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <application android:allowBackup="false" android:label="Hardline Relay"
-        android:icon="@android:drawable/ic_menu_share" android:usesCleartextTraffic="false">
+        android:icon="@drawable/ic_hardline" android:usesCleartextTraffic="false">
         <meta-data android:name="plugin-api" android:value="${atakApiVersion}"/>
-        <meta-data android:name="app_desc" android:value="Hardline Relay development status pane"/>
+        <meta-data android:name="app_desc" android:value="Private mesh channels, positions and points"/>
         <!-- Official discovery marker; this intentionally has no implementation. -->
         <activity android:name="com.atakmap.app.component" android:exported="true"
             tools:ignore="MissingClass">

@@ -58,4 +58,15 @@ class PliTest {
         s.expire(300_001); assertTrue(s.pending.isEmpty())
         s.clear(); assertTrue(s.peers.isEmpty())
     }
+    @Test fun submissionFailureDoesNotOverrideAProcessingReceipt() {
+        val s = PliState()
+        s.sent(42, 0); s.failed(42, "Radio disconnected")
+        assertEquals("Radio disconnected", s.latest?.failure)
+        assertTrue(s.receipt(42, "peer", 100))
+        assertNull(s.latest?.failure)
+        s.failed(42, "Late worker error")
+        assertNull(s.latest?.failure)
+        assertEquals(setOf("peer"), s.latest?.receipts)
+    }
+
 }

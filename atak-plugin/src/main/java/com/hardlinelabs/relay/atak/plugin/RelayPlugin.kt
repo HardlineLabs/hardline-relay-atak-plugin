@@ -18,6 +18,7 @@ import org.meshtastic.core.service.IMeshService
 import org.meshtastic.proto.ChannelSet
 import org.meshtastic.proto.ChannelSettings
 import org.meshtastic.proto.LocalConfig
+import org.meshtastic.proto.Config
 import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.*
@@ -55,14 +56,14 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         { bytes, done -> transmit(bytes, DataPacket.ID_BROADCAST, null, done) },
         { render() })
     private val button = ToolbarItem.Builder("Hardline Relay", MarshalManager.marshal(
-        pluginContext.getDrawable(android.R.drawable.ic_menu_share), android.graphics.drawable.Drawable::class.java,
+        pluginContext.getDrawable(R.drawable.ic_hardline), android.graphics.drawable.Drawable::class.java,
         gov.tak.api.commons.graphics.Bitmap::class.java))
         .setIdentifier("com.hardlinelabs.relay.atak.plugin")
         .setListener(object : ToolbarItemAdapter() {
             override fun onClick(item: ToolbarItem) { showPane() }
         }).build()
 
-    private data class Snapshot(val node: String, val channels: List<ChannelSettings>, val hops: Int)
+    private data class Snapshot(val node: String, val channels: List<ChannelSettings>, val hops: Int, val lora: Config.LoRaConfig)
     private fun read(s: IMeshService): Snapshot {
         @Suppress("DEPRECATION")
         val version = host.packageManager.getPackageInfo("com.geeksville.mesh", 0).versionCode
@@ -71,7 +72,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         check(s.myNodeInfo?.firmwareVersion == "2.7.15.567b8ea") { "Radio firmware must be 2.7.15.567b8ea." }
         val config = LocalConfig.ADAPTER.decode(s.config)
         check(config.lora?.hop_limit == 7) { "Expected 7 hops. Inspect Meshtastic; no settings changed." }
-        return Snapshot(s.myId, ChannelSet.ADAPTER.decode(s.channelSet).settings, 7)
+        return Snapshot(s.myId, ChannelSet.ADAPTER.decode(s.channelSet).settings, 7, requireNotNull(config.lora))
     }
     private fun privateChannel(c: ChannelSettings) = c.psk.size == 32 && c.name.isNotBlank() &&
         !c.name.equals("admin", true) && !c.uplink_enabled && !c.downlink_enabled
@@ -105,7 +106,12 @@ class RelayPlugin(services: IServiceController) : IPlugin {
                 if (!from.matches(Regex("![0-9a-fA-F]{8}")) || from == session.snapshot?.node) return
                 val bytes = packet.bytes?.toByteArray() ?: return
                 val now = SystemClock.elapsedRealtime()
-                if (PointWire.isPointMessage(bytes)) { points.receive(from, bytes, now); return }
+                if (PointWire.isPointMessage(bytes)) {
+                    val previous = points.last.status
+                    points.receive(from, bytes, now)
+                    if (previous != PointSendState.Status.RECEIVED && points.last.status == PointSendState.Status.RECEIVED) lastPointProof = now
+                    render(); return
+                }
                 val message = PliWire.decode(bytes)
                 when (message) {
                     is PliWire.Receipt -> if (state.receipt(message.id, from, now)) status = "Peer $from confirmed processing PLI ${shortId(message.id)}."
@@ -115,7 +121,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
                             updateMarkers(now)
                             // Keep receipts on the same PSK channel as PLI. Direct-message
                             // radio routing can use a different encryption/channel path.
-                            transmit(PliWire.ack(message.pli.id), DataPacket.ID_BROADCAST, null)
+                            receipts.enqueue(from, message.pli, now, random.nextInt(2501).toLong() + 500)
                         }
                     }
                 }
@@ -135,6 +141,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         else @Suppress("DEPRECATION") host.registerReceiver(receiver, filter)
         registered = true
         points.start()
+        indicator = MeshIndicator(map) { showPane() }.also { it.start() }
         connect(); handler.post(tick)
     }
     override fun onStop() {
@@ -144,13 +151,14 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         if (registered) host.unregisterReceiver(receiver)
         registered = false; disconnect(); clearPeers()
         points.stop()
+        indicator?.stop(); indicator = null
         pane?.let { ui?.closePane(it) }; ui?.removeToolbarItem(button)
         pane = null; body = null
         statusText = null; peerText = null; pointText = null; channelButtons = null
     }
     private fun clearPeers() {
         markers.values.forEach { map.rootGroup.removeItem(it) }
-        markers.clear(); state.clear()
+        markers.clear(); state.clear(); receipts.clear(); lastPointProof = -1L
         points.resetContacts()
     }
     private fun reset(message: String) {
@@ -163,6 +171,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             val now = SystemClock.elapsedRealtime()
             if (!session.busy && now - lastRefresh >= 5000) { lastRefresh = now; refresh() }
             if (interval > 0 && now >= nextSend && !session.busy) { nextSend = now + interval * 1000L; sendPli() }
+            if (session.selected != null && !session.busy) receipts.poll(now)?.let { transmit(PliWire.ack(it), DataPacket.ID_BROADCAST, null) }
             state.expire(now); updateMarkers(now); render()
             handler.postDelayed(this, 1000)
         }
@@ -172,44 +181,62 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         val epoch = session.beginRefresh() ?: return
         worker.execute {
             val result = runCatching { read(s) }
+            val catalog = runCatching { ProfileCatalog.read(pluginContext) }
             handler.post {
                 if (!active || !session.finishRefresh(epoch)) return@post
                 result.onSuccess { current ->
+                    val newProfiles = catalog.getOrNull()?.entries.orEmpty()
+                    profileSwitching = catalog.getOrNull()?.switching == true
+                    catalogIssue = if (catalog.isFailure) "Saved channel list unavailable. Open Relay to manage profiles." else null
+                    val profilesChanged = profiles != newProfiles
+                    profiles = newProfiles
                     val old = session.snapshot
                     if (old != null && old != current) reset("Radio/channel changed. Select channel again; automatic sending stopped.")
                     val changed = session.observe(current)
-                    if (changed) {
+                    if (changed || profilesChanged) {
                         status = "Radio connected (${current.node}), 7 hops. Select a private channel."
                         rebuildChannels()
+                    }
+                    if (profileSwitching) {
+                        session.select(null); interval = 0; clearPeers()
+                        status = "Radio activation in progress or unverified. Open Relay for status."
+                        rebuildChannels()
+                    } else profiles.firstOrNull { it.activation.isNotEmpty() && it.activation != lastActivation && matchesActive(it) }?.let { entry ->
+                        lastActivation = entry.activation; chooseChannel(entry.index)
                     }
                 }.onFailure { reset(it.message ?: "Radio unavailable.") }
                 render()
             }
         }
     }
+    private fun positionFix(): Pair<GeoPoint, android.location.Location> {
+        val self = map.selfMarker ?: error("ATAK self position unavailable.")
+        val point = self.point
+        val lm = host.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        check(host.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            "ATAK needs precise location permission. Enable it in Android settings."
+        }
+        val fix = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+            ?.takeIf { it.elapsedRealtimeNanos > 0 && (SystemClock.elapsedRealtimeNanos() - it.elapsedRealtimeNanos) in 0..120_000_000_000L }
+            ?: error("No GPS fix newer than 120 seconds. Move phones near a window/outdoors.")
+        val distance = FloatArray(1)
+        android.location.Location.distanceBetween(point.latitude, point.longitude, fix.latitude, fix.longitude, distance)
+        check(distance[0] <= 100) { "ATAK self position differs from current phone fix. Wait for ATAK location." }
+        return point to fix
+    }
     private fun sendPli() {
         if (session.selected == null) { status = "Select a private channel first."; return }
         val now = SystemClock.elapsedRealtime()
         if (session.busy || now - lastSend < 5000) return
         try {
-            val self = map.selfMarker ?: error("ATAK self position unavailable.")
-            val point = self.point
-            val lm = host.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-            check(host.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                "ATAK needs precise location permission. Enable it in Android settings."
-            }
-            val fix = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                ?.takeIf { it.elapsedRealtimeNanos > 0 && (SystemClock.elapsedRealtimeNanos() - it.elapsedRealtimeNanos) in 0..120_000_000_000L }
-                ?: error("No GPS fix newer than 120 seconds. Move phones near a window/outdoors.")
-            val distance = FloatArray(1)
-            android.location.Location.distanceBetween(point.latitude, point.longitude, fix.latitude, fix.longitude, distance)
-            check(distance[0] <= 100) { "ATAK self position differs from current phone fix. Wait for ATAK location." }
+            val (point, fix) = positionFix()
             var id = random.nextLong(); while (id == 0L) id = random.nextLong()
             val name = map.deviceCallsign.take(20).ifBlank { "Relay" }
             val pli = Pli(id, fix.time, point.latitude, point.longitude, interval, name)
             lastSend = now
+            positionIssue = null
             transmit(PliWire.encode(pli), DataPacket.ID_BROADCAST, id)
-        } catch (e: Exception) { status = e.message ?: "Location unavailable; no PLI sent."; render() }
+        } catch (e: Exception) { positionIssue = e.message ?: "No fresh GPS fix; PLI paused."; status = positionIssue!!; render() }
     }
     private fun transmit(bytes: ByteArray, destination: String, pliId: Long?, done: (String?) -> Unit = {}) {
         val s = service
@@ -229,6 +256,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         worker.execute {
             val result = runCatching {
                 val current = read(s)
+                check(!ProfileCatalog.read(pluginContext).switching) { "Radio activation is pending verification in Relay. Sending paused." }
                 check(current == before && privateChannel(expected)) { "Radio/channel changed; packet not submitted." }
                 check(active && epoch == session.generation) { "Session changed; packet not submitted." }
                 s.send(DataPacket(to = destination, bytes = bytes.toByteString(), dataType = PliWire.PORT,
@@ -241,7 +269,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
                         status = "PLI ${shortId(pliId)} submitted; awaiting plugin receipt."
                     done(null)
                 }.onFailure {
-                    if (pliId != null && state.pending[pliId]?.receipts?.isEmpty() == true) state.pending.remove(pliId)
+                    if (pliId != null) state.failed(pliId, it.message ?: "Radio submission failed.")
                     status = it.message ?: "Packet submission failed."; interval = 0; done(status)
                 }
                 render()
@@ -268,87 +296,230 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         }
         points.updateContacts(state.peers, markers, now)
     }
+    private val ink = android.graphics.Color.rgb(237, 242, 243)
+    private val muted = android.graphics.Color.rgb(153, 171, 179)
+    private val accent = android.graphics.Color.rgb(93, 218, 196)
+    private var healthText: TextView? = null
+    private var gpsText: TextView? = null
+    private var retryButton: Button? = null
+    private var myPliText: TextView? = null
+    private var diagnostics: TextView? = null
+    private var intervalSpinner: Spinner? = null
+    private var syncingControls = false
+    private var positionIssue: String? = null
+    private var profiles = emptyList<ProfileCatalog.Entry>()
+    private var profileSwitching = false
+    private var lastActivation = ""
+    private val receipts = ReceiptSchedule()
+    private var indicator: MeshIndicator? = null
+    private var lastPointProof = -1L
+    private var catalogIssue: String? = null
+    private fun dp(n: Int) = (host.resources.displayMetrics.density * n).toInt()
+    private fun column() = LinearLayout(host).apply { orientation = LinearLayout.VERTICAL }
+    private fun text(parent: LinearLayout, value: String, size: Float = 15f, color: Int = ink) = TextView(host).apply {
+        text = value; textSize = size; setTextColor(color); includeFontPadding = false; setPadding(0, dp(2), 0, dp(2)); parent.addView(this)
+    }
+    private fun card(parent: LinearLayout) = column().apply {
+        background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(android.graphics.Color.rgb(25, 35, 42)); cornerRadius = dp(12).toFloat()
+        }
+        setPadding(dp(10), dp(6), dp(10), dp(6))
+        parent.addView(this, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+    }
+    private fun spinner(parent: LinearLayout, labels: List<String>, selected: Int, choose: (Int) -> Unit): Spinner {
+        val widget = Spinner(host)
+        val adapter = object : ArrayAdapter<String>(host, android.R.layout.simple_spinner_item, labels) {
+            override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View =
+                super.getView(position, convertView, parent).apply { (this as TextView).setTextColor(ink); textSize = 14f; setPadding(dp(6), dp(6), dp(6), dp(6)) }
+            override fun getDropDownView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View =
+                super.getDropDownView(position, convertView, parent).apply {
+                    (this as TextView).setTextColor(ink); setBackgroundColor(android.graphics.Color.rgb(25,35,42))
+                    setPadding(dp(12), dp(16), dp(12), dp(16))
+                }
+        }
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        widget.adapter = adapter
+        widget.setSelection(selected, false)
+        var lastChoice = selected
+        widget.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+            override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                if (position != lastChoice) { lastChoice = position; if (!syncingControls) choose(position) }
+            }
+        }
+        parent.addView(widget, LinearLayout.LayoutParams(-1, -2))
+        return widget
+    }
     private fun showPane() {
         if (pane == null) {
-            body = LinearLayout(host).apply { orientation = LinearLayout.VERTICAL; setPadding(16, 16, 16, 16) }
+            body = column().apply { setPadding(dp(10), dp(8), dp(10), dp(8)); setBackgroundColor(android.graphics.Color.rgb(13,21,27)) }
             val layout = body!!
-            layout.addView(TextView(host).apply { text = "Hardline Relay — mesh development test"; textSize = 18f })
-            statusText = TextView(host); layout.addView(statusText)
-            pointText = TextView(host).apply { textSize = 16f; setPadding(0, 16, 0, 16) }
-            layout.addView(pointText)
-            addButton(layout, "Reconnect / refresh") { if (service == null) { disconnect(); connect() }; refresh() }
-            channelButtons = LinearLayout(host).apply { orientation = LinearLayout.VERTICAL }; layout.addView(channelButtons)
-            addButton(layout, "Send PLI now") { sendPli() }
-            val modes = LinearLayout(host)
-            listOf("Off" to 0, "Every 10s" to 10, "Every 30s" to 30).forEach { (label, seconds) ->
-                addButton(modes, label) {
-                    if (seconds == 0 || session.selected != null) { interval = seconds; nextSend = SystemClock.elapsedRealtime() + seconds * 1000L }
-                    else status = "Select a private channel first."
-                    render()
-                }
+            text(layout, "HARDLINE  /  RELAY", 18f, accent).typeface = android.graphics.Typeface.DEFAULT_BOLD
+            val control = card(layout)
+            val choices = LinearLayout(host)
+            control.addView(choices)
+            val channels = column(); choices.addView(channels, LinearLayout.LayoutParams(0, -2, 1f))
+            val reporting = column(); choices.addView(reporting, LinearLayout.LayoutParams(0, -2, 1f))
+            text(channels, "CHANNEL", 11f, muted)
+            channelButtons = column(); channels.addView(channelButtons)
+            text(reporting, "REPORTING", 11f, muted)
+            intervalSpinner = spinner(reporting, listOf("Off / Manual", "10 seconds", "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes"),
+                PliWire.intervals.indexOf(interval)) { selected ->
+                val seconds = PliWire.intervals[selected]
+                if (seconds == interval) return@spinner
+                if (seconds == 0 || session.selected != null) {
+                    interval = seconds; nextSend = SystemClock.elapsedRealtime() + seconds * 1000L + random.nextInt(1000)
+                    status = if (seconds == 0) "Automatic PLI paused." else "Reporting every ${seconds}s."
+                } else status = "Select a connected channel first."
+                render()
             }
-            layout.addView(modes)
-            peerText = TextView(host); layout.addView(peerText)
-            val scroll = ScrollView(host).apply { addView(layout) }
-            pane = PaneBuilder(scroll).setMetaValue(Pane.RELATIVE_LOCATION, Pane.Location.Default)
-                .setMetaValue(Pane.PREFERRED_WIDTH_RATIO, 0.65).setMetaValue(Pane.PREFERRED_HEIGHT_RATIO, 0.8).build()
+            val actions = LinearLayout(host); control.addView(actions)
+            addButton(actions, "Send PLI now") { sendPli() }
+            addButton(actions, "Pause PLI") { interval = 0; status = "Automatic PLI paused."; render() }
+            addButton(actions, "Channels") { openProfiles() }
+            val summary = card(layout)
+            text(summary, "MESH STATUS", 11f, accent)
+            healthText = text(summary, "", 15f)
+            statusText = text(summary, "", 13f, muted)
+            gpsText = text(summary, "", 13f, muted)
+            myPliText = text(summary, "", 13f)
+            pointText = text(summary, "", 13f)
+            retryButton = addButton(summary, "Retry last point") { points.retry() }
+            peerText = text(summary, "", 13f)
+            diagnostics = text(summary, "", 13f, muted)
+            addButton(summary, "Reconnect / refresh") { if (service == null) { disconnect(); connect() }; refresh() }
+            pane = PaneBuilder(ScrollView(host).apply { isFillViewport = true; setBackgroundColor(android.graphics.Color.rgb(13,21,27)); addView(layout) })
+                .setMetaValue(Pane.RELATIVE_LOCATION, Pane.Location.Default)
+                .setMetaValue(Pane.PREFERRED_WIDTH_RATIO, 0.65).setMetaValue(Pane.PREFERRED_HEIGHT_RATIO, 1.0).build()
             rebuildChannels()
         }
         render(); if (!ui.isPaneVisible(pane)) ui.showPane(pane, null)
     }
-    private fun addButton(layout: LinearLayout, label: String, action: () -> Unit) {
-        layout.addView(Button(host).apply { text = label; setOnClickListener { action() } })
-    }
-    private fun rebuildChannels() {
-        channelButtons?.removeAllViews()
-        session.snapshot?.channels?.forEachIndexed { index, c ->
-            if (index > 0 && privateChannel(c)) channelButtons?.let { layout ->
-                addButton(layout, "Use ${c.name}") {
-                    session.select(index); interval = 0; clearPeers()
-                    status = "Selected ${c.name}. Receiving PLI; automatic sending Off."; render()
-                }
-            }
+    private fun addButton(layout: LinearLayout, label: String, action: () -> Unit): Button {
+        val widget = Button(host).apply {
+            text = label; isAllCaps = false; textSize = 12f; minHeight = dp(36); minimumHeight = dp(36); setPadding(dp(4), dp(4), dp(4), dp(4)); setTextColor(ink)
+            backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.rgb(44,67,73))
+            setOnClickListener { action() }
         }
+        layout.addView(widget, if (layout.orientation == LinearLayout.HORIZONTAL) LinearLayout.LayoutParams(0, -2, 1f) else LinearLayout.LayoutParams(-1, -2))
+        return widget
+    }
+    private fun chooseChannel(index: Int) {
+        if (profileSwitching) { status = "Finish or verify channel activation in Relay first."; render(); return }
+        session.select(index); interval = 0; clearPeers(); positionIssue = null
+        status = "Channel selected · Automatic PLI off."
+        rebuildChannels(); render()
+    }
+    private fun openProfiles(id: String? = null) {
+        try {
+            session.select(null); interval = 0; clearPeers()
+            status = "Channel activation in Relay · Sending paused."
+            ProfileCatalog.open(host, id)
+        } catch (_: Exception) { status = "Install Hardline Relay to manage channels."; render() }
+    }
+    private fun matchesActive(entry: ProfileCatalog.Entry): Boolean {
+        val current = session.snapshot ?: return false
+        val channel = current.channels.getOrNull(entry.index) ?: return false
+        return entry.activation.isNotEmpty() &&
+            current.node == "!" + java.lang.Integer.toUnsignedString(entry.node, 16).padStart(8, '0') &&
+            current.lora.channel_num == entry.slot && current.lora.region == Config.LoRaConfig.RegionCode.US &&
+            current.lora.use_preset && current.lora.modem_preset == Config.LoRaConfig.ModemPreset.LONG_FAST &&
+            current.lora.override_frequency == 0f && current.lora.frequency_offset == 0f &&
+            ProfileCatalog.fingerprint(channel.encode()) == entry.fingerprint
+    }
+
+    private fun rebuildChannels() {
+        val parent = channelButtons ?: return
+        parent.removeAllViews()
+        val installed = session.snapshot?.channels?.mapIndexedNotNull { i, c ->
+            if (i > 0 && privateChannel(c)) i to c.name else null
+        }.orEmpty()
+        val saved = profiles.filter { p -> installed.none { it.second.equals(p.name, true) } }
+        val labels = listOf("Select a channel") + installed.map { it.second } + saved.map { "${it.name} · ${if (it.locked) "Locked" else "Saved"}" }
+        val selected = installed.indexOfFirst { it.first == session.selected }.let { if (it < 0) 0 else it + 1 }
+        spinner(parent, labels, selected) { pos ->
+            if (pos == 0) { session.select(null); interval = 0; clearPeers(); render() }
+            else if (pos <= installed.size) {
+                val channel = installed[pos - 1]
+                val profile = profiles.firstOrNull { it.name.equals(channel.second, true) }
+                // Installed keys do not imply the radio is on this profile's RF settings.
+                if (profile != null && !matchesActive(profile)) openProfiles(profile.id)
+                else chooseChannel(channel.first)
+            }
+            else openProfiles(saved[pos - installed.size - 1].id)
+        }
+    }
+    private fun age(ms: Long): String {
+        val seconds = (ms.coerceAtLeast(0) / 1000)
+        return if (seconds < 60) "${seconds}s" else if (seconds < 3600) "${seconds / 60}m" else "${seconds / 3600}h"
     }
     private fun render() {
         val now = SystemClock.elapsedRealtime()
         points.last.tick(now)
-        val lastPoint = points.last
-        val label = when (lastPoint.status) {
-            PointSendState.Status.NONE -> "NONE"
-            PointSendState.Status.SUBMITTING -> "SUBMITTING"
-            PointSendState.Status.AWAITING -> "AWAITING RECEIPT"
-            PointSendState.Status.RECEIVED -> "RECEIVED"
-            PointSendState.Status.UNCONFIRMED -> "UNCONFIRMED"
-            PointSendState.Status.FAILED -> "SEND FAILED"
+        val p = points.last
+        val gps = runCatching { positionFix().second }
+        positionIssue = gps.exceptionOrNull()?.message
+        gpsText?.text = gps.getOrNull()?.let { "GPS · Fix ${age((SystemClock.elapsedRealtimeNanos() - it.elapsedRealtimeNanos) / 1_000_000)} old" } ?: "GPS unavailable · No position sent"
+        retryButton?.visibility = if (p.status in listOf(PointSendState.Status.UNCONFIRMED, PointSendState.Status.FAILED)) android.view.View.VISIBLE else android.view.View.GONE
+        val label = when (p.status) {
+            PointSendState.Status.NONE -> "No point sent"
+            PointSendState.Status.SUBMITTING -> "Sending"
+            PointSendState.Status.AWAITING -> "Awaiting receipt"
+            PointSendState.Status.RECEIVED -> "Received"
+            PointSendState.Status.UNCONFIRMED -> "Unconfirmed"
+            PointSendState.Status.FAILED -> "Send failed"
         }
-        pointText?.text = buildString {
-            append("Last point: $label\n")
-            lastPoint.point?.let { append("${it.name} → ${lastPoint.recipientName}\n") }
-            append(lastPoint.detail)
-        }
-        pointText?.setTextColor(when (lastPoint.status) {
-            PointSendState.Status.RECEIVED -> android.graphics.Color.rgb(100, 220, 140)
-            PointSendState.Status.FAILED -> android.graphics.Color.rgb(255, 130, 130)
-            PointSendState.Status.UNCONFIRMED, PointSendState.Status.AWAITING,
-            PointSendState.Status.SUBMITTING -> android.graphics.Color.rgb(255, 210, 100)
-            PointSendState.Status.NONE -> android.graphics.Color.LTGRAY
+        pointText?.text = "Last point · $label" + (p.point?.let { "\n${it.name} → ${p.recipientName}" } ?: "")
+        pointText?.setTextColor(when (p.status) {
+            PointSendState.Status.RECEIVED -> accent
+            PointSendState.Status.FAILED -> android.graphics.Color.rgb(255,130,130)
+            PointSendState.Status.AWAITING, PointSendState.Status.UNCONFIRMED -> android.graphics.Color.rgb(255,195,100)
+            else -> ink
         })
-        val name = session.selected?.let { session.snapshot?.channels?.getOrNull(it)?.name } ?: "none"
-        statusText?.text = "$status\nChannel: $name | Auto: ${if (interval == 0) "Off" else "${interval}s"}\nTAK server connections unchanged."
-        val time = SimpleDateFormat("HH:mm:ss", Locale.US)
+        val recent = state.peers.values.any { !it.stale(now) } ||
+            (state.lastConfirmation >= 0 && now - state.lastConfirmation < maxOf(60_000L, interval * 3000L)) ||
+            (lastPointProof >= 0 && now - lastPointProof < 60_000L)
+        val health = if (profileSwitching) MeshHealth.State.WAITING else MeshHealth.assess(session.snapshot != null && service != null, session.selected != null,
+            recent, interval > 0 && positionIssue != null)
+        indicator?.update(health)
+        healthText?.text = when (health) {
+            MeshHealth.State.FAULT -> "Radio unavailable"
+            MeshHealth.State.INACTIVE -> "Choose a channel"
+            MeshHealth.State.WAITING -> if (profileSwitching) "Channel activation needs verification" else if (positionIssue != null && interval > 0) "Position reporting needs attention" else "Waiting for mesh contact"
+            MeshHealth.State.CONFIRMED -> "Recent mesh contact"
+        }
+        val name = session.selected?.let { session.snapshot?.channels?.getOrNull(it)?.name } ?: "None"
+        statusText?.text = "$name · ${if (interval == 0) "PLI off" else "PLI every ${interval}s"}"
+        val sent = state.latest
+        myPliText?.text = if (sent == null) "My PLI · No report this session" else
+            "My PLI · ${age(now - sent.at)} ago · " + when {
+                sent.receipts.isNotEmpty() -> "Confirmed by ${sent.receipts.size}"
+                sent.failure != null -> "Send failed"
+                now - sent.at < 60_000 -> "Awaiting receipt"
+                else -> "Unconfirmed"
+            } + if (state.lastConfirmation >= 0) "\nLast confirmation ${age(now - state.lastConfirmation)} ago" else ""
         peerText?.text = buildString {
-            append("\nPeer PLI (receipt age is local; fix time is sender clock)\n")
-            if (state.peers.isEmpty()) append("No peer PLI received this session.\n")
-            state.peers.forEach { (node, peer) ->
-                append("${peer.pli.callsign} $node: ${if (peer.stale(now)) "STALE / last known" else "RECENT"}\n")
-                append("Received ${time.format(Date(peer.receivedWall))} (${peer.age(now)}s ago); fix ${time.format(Date(peer.pli.fixTime))}; sender ${if (peer.pli.interval == 0) "manual" else "${peer.pli.interval}s"}\n")
-            }
-            append("\nMy recent PLI receipts (not a radio ACK):\n")
-            state.pending.values.toList().takeLast(5).reversed().forEach {
-                val age = (now - it.at) / 1000
-                append("${shortId(it.id)}: ${if (it.receipts.isNotEmpty()) "CONFIRMED by ${it.receipts.joinToString()}" else if (age >= 60) "UNCONFIRMED (timeout)" else "awaiting receipt"} (${age}s ago)\n")
+            val overdue = state.peers.values.count { it.stale(now) }
+            append("Contacts · ${state.peers.size - overdue} reporting · $overdue overdue")
+            state.peers.values.sortedByDescending { it.stale(now) }.forEach { peer ->
+                append("\n${peer.pli.callsign} · ${if (peer.stale(now)) "Overdue · " else ""}Position ${age(System.currentTimeMillis() - peer.pli.fixTime)} old")
             }
         }
+        val problem = health in listOf(MeshHealth.State.FAULT, MeshHealth.State.WAITING) ||
+            p.status in listOf(PointSendState.Status.FAILED, PointSendState.Status.UNCONFIRMED) || positionIssue != null || sent?.failure != null || catalogIssue != null || profileSwitching
+        diagnostics?.visibility = if (problem) android.view.View.VISIBLE else android.view.View.GONE
+        diagnostics?.text = buildString {
+            if (positionIssue != null) append(positionIssue).append("\n")
+            append(status)
+            sent?.failure?.let { append("\n").append(it) }
+            if (p.status in listOf(PointSendState.Status.FAILED, PointSendState.Status.UNCONFIRMED)) append("\n").append(p.detail)
+            if (health == MeshHealth.State.WAITING && !recent && !profileSwitching) append("\nNo recent peer evidence. Check teammates are on the same channel/frequency and keep radios clear of obstructions.")
+            session.snapshot?.let { append("\nRadio ${it.node} · ${it.lora.modem_preset} · Slot ${it.lora.channel_num} · ${it.hops} hops") }
+            catalogIssue?.let { append("\n").append(it) }
+        }
+        syncingControls = true
+        val mode = PliWire.intervals.indexOf(interval)
+        if (intervalSpinner?.selectedItemPosition != mode) intervalSpinner?.setSelection(mode, false)
+        syncingControls = false
     }
 }

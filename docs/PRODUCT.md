@@ -5,21 +5,34 @@ connections. Relay App owns private-channel creation and QR provisioning;
 the plugin owns PLI intervals, peer display and application receipts. Last-known
 positions must not look like proof that a peer is still actively sending.
 
-## Implemented experiment, not completed acceptance
+## Operation
 
 The optional :atak-plugin module targets ATAK CIV API 5.6.0 using the local
-5.6.0.23 SDK development host. Version 0.3.0-dev (3) binds independently to
+5.6.0.23 SDK development host. Version 0.4.0 (4) binds independently to
 Meshtastic Android 2.7.13 IMeshService using the ATAK host Context. Meshtastic
 owns BLE. The plugin reads channel configuration transiently (including keys for
 change detection), never persists it, and never writes radio configuration.
 It requires firmware 2.7.15.567b8ea and the lab's fixed 7-hop configuration.
 
-In Tools > Hardline Relay, select a private secondary channel provisioned by Relay.
-Controls are Send PLI now, Off, Every 10s and Every 30s. Sending defaults Off;
-selecting a channel enables reception, not automatic transmission. Closing the
-pane does not stop an enabled timer: choose Off explicitly before leaving.
-Plugin unload, detected disconnection or radio/channel change stops automatic
-sending and clears session state. Do not edit channels concurrently in Meshtastic.
+Open Hardline Relay from its toolbar item or the small HL badge above the map's
+connection area. Choose an installed channel or a saved Relay profile. A profile
+requiring activation opens Relay for passphrase entry and verified configuration;
+the plugin itself never writes radio settings. Sending is paused during activation
+and remains Off afterward. Installed keys alone do not establish the profile's RF.
+
+Reporting choices are Off / Manual, 10s, 30s, 1m, 2m, 5m and 10m. Short intervals
+consume more airtime; start with a slower cadence for larger meshes. Send PLI now
+sends a single report. Closing the pane leaves an enabled timer running; Pause PLI
+stops it. Plugin unload, detected disconnection or radio/channel changes stop
+automatic sending and reset the session. There are no catch-up bursts.
+
+The compact pane shows GPS freshness, your latest PLI/last confirmation, the latest
+point attempt, and every contact's position age. Overdue contacts sort first.
+Faults reveal the relevant reason and radio settings. The badge is gray with no
+selected channel, red for an unavailable radio, amber while waiting for evidence
+or resolving activation/position reporting, and green after recent peer evidence.
+Green is a recent communication observation, not guaranteed current reachability.
+TAK-server connectivity is separate. No Wi-Fi, mobile data or backend is required.
 
 The [PLI contract](../protocol/pli-v1.md) owns exact packet fields, freshness
 thresholds, bounds and trust limitations. PLI uses ATAK's self position guarded by
@@ -50,7 +63,9 @@ read it; recipient selection is not recipient-only encryption. Supported basic
 spot and ground markers carry coordinates, a name of up to 24 UTF-8 bytes, symbol
 and color. Unsupported selections and long names fail visibly rather than silently
 changing the point. Altitude, remarks, files, shapes/routes and custom icons are
-outside this first compact format. No automatic resend or periodic point sending.
+outside this first compact format. No automatic resend or periodic point sending. A failed/unconfirmed attempt offers
+a manual Retry button, reusing the source marker only while that marker and contact
+remain available in the same session.
 
 The plugin pane has a separate **Last point** indicator: SUBMITTING, AWAITING
 RECEIPT, RECEIVED (green), UNCONFIRMED (amber), or SEND FAILED (red). It includes
@@ -66,36 +81,22 @@ freshness. Up to 128 received points remain in memory through BLE loss/channel
 reselection and disappear on plugin unload/ATAK restart. They are not yet durable
 ATAK imports. A plugin restart clears the last-send indicator and Relay contacts.
 
-## Evidence and remaining gates
+## Evidence boundary
 
-Observed on two Moto G Play 2024 / Android 14 phones with Heltec V3 radios:
+The supported lab uses two Moto G Play 2024 / Android 14 phones, Heltec V3 radios,
+Meshtastic Android 2.7.13 and firmware 2.7.15.567b8ea, US LONG_FAST / seven hops.
+Manual PLI, same-channel processing receipts and native point sends/receipts have
+passed both directions. Protected optical provisioning, wrong-passphrase rejection,
+radio restart/reconnect/read-back and offline storage have been exercised on both
+phones. See DEVELOPMENT.md for repeatable acceptance procedures.
 
-- SDK host/plugin installation, host loading and AIDL radio/channel reads pass.
-- Manual PLI arrived in each direction on RelayTest. Peer panes displayed callsigns,
-  fix times and receipt ages. This was real RF, not a fake transport.
-- Initial direct-message return receipts did not appear. The current build changes
-  receipts to same-channel broadcasts. Manual PLI and those application receipts
-  passed both ways during compact-point acceptance on the existing private channel.
-  Root cause of the original missing direct-message receipts was not established.
-- Compact point Send through ATAK's native recipient picker passed both ways.
-  PLI-derived Relay contacts were selectable, each recipient showed the named
-  ground marker on its map, and each sender showed Last point: RECEIVED.
-  Tests used explicit named test points, not substituted phone GPS positions.
-- GPS permissions were enabled; poor indoor reception initially prevented fixes.
-  Window placement produced fixes and allowed the manual PLI test.
-- HLM1 subsequently lost BLE; the plugin detected disconnection, reset selection
-  and showed automatic Off. Controlled reconnection/recovery is not yet verified.
+JVM tests cover wire bounds, addressing, revision ordering, late/duplicate receipts,
+stale transitions, all interval values, bounded receipt scheduling, session resets
+and submission/receipt races. Build/lint and physical host tests are separate.
 
-Local checks pass: 26 core JVM tests (10 PLI, 10 point, 3 session and 3 status tests),
-seven device-script tests, standalone APK/instrumentation APK builds and lint,
-and actual ATAK SDK plugin build/Android/TAK lint. Unit tests are not proof of
-radio receipts or map rendering. The separate :app remains a labelled simulation
-harness; its instrumentation does not test the loaded ATAK plugin.
-
-Pending: extended point update/loss/recovery and third-peer hardware acceptance;
-complete PLI visual marker location/title verification;
-bounded 10s/30s runs; Off/no-more-sends; stale transitions/recovery; restart/reload;
-BLE loss/reconnect; real TAK-server coexistence; range/airtime/reliability; production
-host/signing compatibility. Do not call this milestone complete yet. Do not bridge
-ordinary TAK-server CoT or install the reference Meshtastic ATAK plugin alongside
-this experiment automatically. See DEVELOPMENT.md for acceptance and review gaps.
+This is nearby integration evidence. It does not establish long-range reliability,
+third-party public-node forwarding, multi-hop congestion behavior, production host
+signing compatibility or operation on every phone/region. Third-recipient filtering
+has deterministic tests; a three-radio field exercise remains separate. No ordinary
+TAK-server traffic is bridged to LoRa, and live TAK-server coexistence has not been
+certified. Do not install another Meshtastic ATAK bridge automatically.

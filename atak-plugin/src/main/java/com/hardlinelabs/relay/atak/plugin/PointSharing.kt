@@ -31,6 +31,8 @@ internal class PointSharing(
     private val pointMarkers = linkedMapOf<String, Marker>()
     private val random = SecureRandom()
     private var started = false
+    private var retryMarker: String? = null
+    private var retryNode: String? = null
 
     private val sendReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -52,6 +54,7 @@ internal class PointSharing(
                 check(marker != map.selfMarker && !uid.startsWith("hardline-relay:")) { "Use PLI for a live contact; select a point marker." }
                 send(marker, contact)
             } catch (e: Exception) {
+                retryMarker = null; retryNode = null
                 last.failed(null, e.message ?: "Point not submitted.")
             }
             changed()
@@ -75,6 +78,7 @@ internal class PointSharing(
     }
 
     fun resetContacts() {
+        retryMarker = null; retryNode = null
         contacts.values.forEach { Contacts.getInstance().removeContact(it) }
         contacts.clear()
         contactStaleness.clear()
@@ -117,6 +121,7 @@ internal class PointSharing(
             marker.point.latitude, marker.point.longitude, symbol,
             marker.color, marker.title.orEmpty())
         val bytes = PointWire.encode(point)
+        retryMarker = marker.uid; retryNode = node
         marker.setMetaLong("relayPointRevision", revision)
         last.begin(point, contact.name, SystemClock.elapsedRealtime())
         changed()
@@ -144,6 +149,16 @@ internal class PointSharing(
             }
         }
         changed()
+    }
+
+    fun retry() {
+        try {
+            check(last.status in listOf(PointSendState.Status.UNCONFIRMED, PointSendState.Status.FAILED)) { "Wait for the current attempt before retrying." }
+            val marker = retryMarker?.let { map.rootGroup.deepFindUID(it) as? Marker }
+                ?: error("Select the point and recipient again.")
+            val contact = contacts[retryNode] ?: error("Recipient unavailable. Select the point and recipient again.")
+            send(marker, contact)
+        } catch (e: Exception) { last.failed(null, e.message ?: "Point not submitted."); changed() }
     }
 
     private fun importPoint(from: String, p: MeshPoint) {
