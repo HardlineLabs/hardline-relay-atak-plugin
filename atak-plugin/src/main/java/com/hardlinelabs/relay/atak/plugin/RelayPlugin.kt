@@ -181,13 +181,13 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         val epoch = session.beginRefresh() ?: return
         worker.execute {
             val result = runCatching { read(s) }
-            val catalog = runCatching { ProfileCatalog.read(pluginContext) }
+            val catalog = runCatching { ProfileCatalog.read(host) }
             handler.post {
                 if (!active || !session.finishRefresh(epoch)) return@post
                 result.onSuccess { current ->
                     val newProfiles = catalog.getOrNull()?.entries.orEmpty()
                     profileSwitching = catalog.getOrNull()?.switching == true
-                    catalogIssue = if (catalog.isFailure) "Saved channel list unavailable. Open Relay to manage profiles." else null
+                    catalogIssue = if (catalog.isFailure) "Open Hardline Relay to reconnect saved channels. Sending paused." else null
                     val profilesChanged = profiles != newProfiles
                     profiles = newProfiles
                     val old = session.snapshot
@@ -197,9 +197,9 @@ class RelayPlugin(services: IServiceController) : IPlugin {
                         status = "Radio connected (${current.node}), 7 hops. Select a private channel."
                         rebuildChannels()
                     }
-                    if (profileSwitching) {
+                    if (profileSwitching || catalogIssue != null) {
                         session.select(null); interval = 0; clearPeers()
-                        status = "Radio activation in progress or unverified. Open Relay for status."
+                        status = catalogIssue ?: "Radio activation in progress or unverified. Open Relay for status."
                         rebuildChannels()
                     } else profiles.firstOrNull { it.activation.isNotEmpty() && it.activation != lastActivation && matchesActive(it) }?.let { entry ->
                         lastActivation = entry.activation; chooseChannel(entry.index)
@@ -256,7 +256,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         worker.execute {
             val result = runCatching {
                 val current = read(s)
-                check(!ProfileCatalog.read(pluginContext).switching) { "Radio activation is pending verification in Relay. Sending paused." }
+                check(!ProfileCatalog.read(host).switching) { "Radio activation is pending verification in Relay. Sending paused." }
                 check(current == before && privateChannel(expected)) { "Radio/channel changed; packet not submitted." }
                 check(active && epoch == session.generation) { "Session changed; packet not submitted." }
                 s.send(DataPacket(to = destination, bytes = bytes.toByteString(), dataType = PliWire.PORT,
@@ -405,7 +405,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         return widget
     }
     private fun chooseChannel(index: Int) {
-        if (profileSwitching) { status = "Finish or verify channel activation in Relay first."; render(); return }
+        if (profileSwitching || catalogIssue != null) { status = catalogIssue ?: "Finish or verify channel activation in Relay first."; rebuildChannels(); render(); return }
         session.select(index); interval = 0; clearPeers(); positionIssue = null
         status = "Channel selected · Automatic PLI off."
         rebuildChannels(); render()
@@ -414,6 +414,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         try {
             session.select(null); interval = 0; clearPeers()
             status = "Channel activation in Relay · Sending paused."
+            rebuildChannels(); render()
             ProfileCatalog.open(host, id)
         } catch (_: Exception) { status = "Install Hardline Relay to manage channels."; render() }
     }
@@ -479,13 +480,13 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         val recent = state.peers.values.any { !it.stale(now) } ||
             (state.lastConfirmation >= 0 && now - state.lastConfirmation < maxOf(60_000L, interval * 3000L)) ||
             (lastPointProof >= 0 && now - lastPointProof < 60_000L)
-        val health = if (profileSwitching) MeshHealth.State.WAITING else MeshHealth.assess(session.snapshot != null && service != null, session.selected != null,
+        val health = if (profileSwitching || catalogIssue != null) MeshHealth.State.WAITING else MeshHealth.assess(session.snapshot != null && service != null, session.selected != null,
             recent, interval > 0 && positionIssue != null)
         indicator?.update(health)
         healthText?.text = when (health) {
             MeshHealth.State.FAULT -> "Radio unavailable"
             MeshHealth.State.INACTIVE -> "Choose a channel"
-            MeshHealth.State.WAITING -> if (profileSwitching) "Channel activation needs verification" else if (positionIssue != null && interval > 0) "Position reporting needs attention" else "Waiting for mesh contact"
+            MeshHealth.State.WAITING -> if (catalogIssue != null) "Open Relay to connect channels" else if (profileSwitching) "Channel activation needs verification" else if (positionIssue != null && interval > 0) "Position reporting needs attention" else "Waiting for mesh contact"
             MeshHealth.State.CONFIRMED -> "Recent mesh contact"
         }
         val name = session.selected?.let { session.snapshot?.channels?.getOrNull(it)?.name } ?: "None"
@@ -513,7 +514,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             append(status)
             sent?.failure?.let { append("\n").append(it) }
             if (p.status in listOf(PointSendState.Status.FAILED, PointSendState.Status.UNCONFIRMED)) append("\n").append(p.detail)
-            if (health == MeshHealth.State.WAITING && !recent && !profileSwitching) append("\nNo recent peer evidence. Check teammates are on the same channel/frequency and keep radios clear of obstructions.")
+            if (health == MeshHealth.State.WAITING && !recent && !profileSwitching && catalogIssue == null) append("\nNo recent peer evidence. Check teammates are on the same channel/frequency and keep radios clear of obstructions.")
             session.snapshot?.let { append("\nRadio ${it.node} · ${it.lora.modem_preset} · Slot ${it.lora.channel_num} · ${it.hops} hops") }
             catalogIssue?.let { append("\n").append(it) }
         }

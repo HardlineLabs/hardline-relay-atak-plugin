@@ -6,13 +6,20 @@ import android.net.Uri
 import java.security.MessageDigest
 
 internal object ProfileCatalog {
+    private val uri = Uri.parse("content://com.hardlinelabs.relay.profiles/profiles")
+    private var grantRetained = false
     data class Entry(val id: String, val name: String, val locked: Boolean, val activation: String,
                      val node: Int, val index: Int, val slot: Int, val fingerprint: String, val switching: Boolean)
     data class Snapshot(val entries: List<Entry>, val switching: Boolean)
     fun read(context: Context): Snapshot {
         var switching = false
         val result = mutableListOf<Entry>()
-        context.contentResolver.query(Uri.parse("content://com.hardlinelabs.relay.profiles/profiles"), null, null, null, null)?.use { c ->
+        val cursor = context.contentResolver.query(uri, null, null, null, null)
+            ?: error("Open Hardline Relay once to connect saved channels to ATAK. Sending paused.")
+        if (!grantRetained) grantRetained = runCatching {
+            context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }.isSuccess
+        cursor.use { c ->
             switching = c.extras.getBoolean("switching", false)
             while (c.moveToNext() && result.size < 64) {
                 fun s(name: String) = c.getString(c.getColumnIndexOrThrow(name)).orEmpty()
