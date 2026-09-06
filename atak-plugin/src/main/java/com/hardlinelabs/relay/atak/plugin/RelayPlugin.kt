@@ -327,10 +327,10 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         parent.addView(this, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
     }
     private fun spinner(parent: LinearLayout, labels: List<String>, selected: Int, choose: (Int) -> Unit): Spinner {
-        val widget = Spinner(host)
+        val widget = Spinner(host).apply { setBackgroundColor(android.graphics.Color.rgb(44,67,73)) }
         val adapter = object : ArrayAdapter<String>(host, android.R.layout.simple_spinner_item, labels) {
             override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View =
-                super.getView(position, convertView, parent).apply { (this as TextView).setTextColor(ink); textSize = 14f; setPadding(dp(6), dp(6), dp(6), dp(6)) }
+                super.getView(position, convertView, parent).apply { (this as TextView).setTextColor(ink); text = "${getItem(position)} ▾"; isSingleLine = true; ellipsize = android.text.TextUtils.TruncateAt.END; textSize = 14f; setPadding(dp(6), dp(6), dp(6), dp(6)) }
             override fun getDropDownView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View =
                 super.getDropDownView(position, convertView, parent).apply {
                     (this as TextView).setTextColor(ink); setBackgroundColor(android.graphics.Color.rgb(25,35,42))
