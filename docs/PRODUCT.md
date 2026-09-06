@@ -88,7 +88,14 @@ Meshtastic Android 2.7.13 and firmware 2.7.15.567b8ea, US LONG_FAST / seven hops
 Manual PLI, same-channel processing receipts and native point sends/receipts have
 passed both directions. Protected optical provisioning, wrong-passphrase rejection,
 radio restart/reconnect/read-back and offline storage have been exercised on both
-phones. See DEVELOPMENT.md for repeatable acceptance procedures.
+phones. Public-compatible and separate-frequency profiles were verified on both,
+including passphrase activation from the loaded ATAK dropdown. Native point updates
+kept one receiver marker with the new name. Short-interval reporting, Pause and
+visible overdue transitions were checked with Wi-Fi/mobile data disabled.
+A ten-minute scheduled PLI arrived and was confirmed after the full interval.
+Closing the receiving ATAK produced an unconfirmed point; restart and manual Retry
+produced Received. Bluetooth loss showed a red badge and cleared selection;
+reconnection/reselection restored traffic while automatic reporting remained Off. See DEVELOPMENT.md for repeatable acceptance procedures.
 
 JVM tests cover wire bounds, addressing, revision ordering, late/duplicate receipts,
 stale transitions, all interval values, bounded receipt scheduling, session resets

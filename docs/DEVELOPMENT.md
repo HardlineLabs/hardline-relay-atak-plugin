@@ -71,7 +71,9 @@ ATAK work run `./tools/build-atak.ps1`, then install the explicit APK:
    token, attributed to B. Repeat B to A. Submitted alone is not acceptance.
 5. Only after receipts work, run one sender at 10s for roughly three updates,
    then Off. Repeat at 30s. Observe intervals and absence of catch-up traffic.
-   Leave both Off. Do not run unattended high-rate seven-hop tests.
+   Also exercise a full ten-minute interval without catch-up bursts; all intermediate
+   interval values have wire/freshness tests. Leave both Off. Do not run unattended
+   high-rate seven-hop tests.
 6. Stop peer sending while keeping the receiver connected. Verify its marker and
    peer pane become STALE after the contract threshold; receipt-only traffic must
    not refresh PLI age. Resume one fresh PLI and verify recovery without duplicates.
