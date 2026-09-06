@@ -6,7 +6,9 @@ host versionCode 1786740347. The workstation inventory owns the archive pin.
 `./tools/build-atak.ps1` verifies local SDK hashes, opts into :atak-plugin,
 then builds and lints the CIV debug APK. This passes locally. Host discovery,
 loading and opening the development pane pass on the pinned API34 emulator
-with SwiftShader graphics. Radio binding is not implemented or tested yet.
+with SwiftShader graphics for the original scaffold. The PLI build now loads and
+binds to real radios on both phones; acceptance remains partial as recorded in
+../docs/PRODUCT.md. The emulator does not emulate a LoRa radio.
 Normal CI builds only :app (the standalone simulation) and :core; it never
 uploads or downloads the restricted SDK.
 
@@ -25,13 +27,16 @@ After the emulator boots or exactly two authorized development phones are connec
 3. Install the plugin with `./tools/devices.ps1 install --apk atak-plugin/build/outputs/apk/civ/debug/atak-plugin-civ-debug.apk`.
 4. Open ATAK, complete local permission/onboarding prompts, enable Hardline Relay
    in Plugins, then open its toolbar item. Confirm the development disclaimer.
-5. Close/reopen its pane and restart ATAK. Check that normal TAK connections remain
-   untouched. Add read-only Meshtastic AIDL binding only after this baseline works.
+5. Follow the physical PLI acceptance workflow in ../docs/DEVELOPMENT.md.
+   Verify Plugins > Hardline Relay says Loaded after every update/restart;
+   one lab phone required manual re-enabling after APK updates.
 
 For one emulator append `--allow-emulator --serial emulator-5554 --count 1`,
 using the actual serial from `./tools/devices.ps1 list`.
 Never silently uninstall a production ATAK installation to change signing identities.
 The generic `devices.ps1 test` runs the standalone harness tests, not ATAK-host tests.
+The SDK host has a development watermark/test signature. It is not byte-identical
+to production 5.6.0.CIV; matching API is not production signing/load compatibility.
 
 TAK.gov is informational/manual-download-only. Uploads, signing requests, support
 contact, account changes or any other submissions need explicit creator approval.

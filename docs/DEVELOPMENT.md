@@ -38,6 +38,57 @@ For the actual SDK-host plugin build and install, use ../atak-plugin/README.md.
 
 ## Build outputs
 
+The daily install/test commands above target the standalone harness. For real
+ATAK work run `./tools/build-atak.ps1`, then install the explicit APK:
+
+```powershell
+./tools/devices.ps1 install --apk atak-plugin/build/outputs/apk/civ/debug/atak-plugin-civ-debug.apk --serial ZL8326CMLX --serial ZL83257CQC --count 2
+./tools/compare-contract.ps1 -OtherRepository '../Hardline Relay App'
+```
+
+## Physical PLI acceptance
+
+1. Read PRODUCT.md for the evidence boundary. Verify both ADB devices, fixed
+   versions, radio power/antennas, and Meshtastic Connected to the correct radio.
+   Keep LongFast/RelayTest and 7 hops unchanged. No channel recreation is needed.
+2. Open ATAK on each phone. Confirm precise location permission and a live GPS
+   fix; window/outdoor placement was needed indoors. No mock positions or silent
+   network-location fallback. Keep phone clocks automatic for fix-time checks.
+3. In ATAK Plugins, load Hardline Relay if necessary. Open Tools > Hardline Relay
+   and choose Use RelayTest on each. Verify radio IDs and Auto: Off.
+4. Send one manual PLI from A. On B verify peer pane AND actual map marker/location,
+   callsign, fix time and receipt age. On A require CONFIRMED for the matching
+   token, attributed to B. Repeat B to A. Submitted alone is not acceptance.
+5. Only after receipts work, run one sender at 10s for roughly three updates,
+   then Off. Repeat at 30s. Observe intervals and absence of catch-up traffic.
+   Leave both Off. Do not run unattended high-rate seven-hop tests.
+6. Stop peer sending while keeping the receiver connected. Verify its marker and
+   peer pane become STALE after the contract threshold; receipt-only traffic must
+   not refresh PLI age. Resume one fresh PLI and verify recovery without duplicates.
+7. Test pane close/reopen, plugin reload, ATAK restart, BLE loss/reconnect and
+   channel-change guards separately. Require reselecting a channel after reset,
+   with Auto Off. Real TAK-server coexistence needs its own test; no automatic
+   CoT dispatch is implemented.
+
+Use live, narrowly filtered diagnostics. Android UI dumps may be staged at
+`/data/local/tmp/relay-diagnostic-ui.xml`, read, then immediately removed. Do not
+save location screenshots, Meshtastic packet logs, channel secrets or QR payloads.
+ATAK's map/toolbars are partly canvas-based; empty UI text is not proof of a crash.
+Check loading/screen wake state before interacting. Physical permission prompts
+are for the creator; do not reuse emulator-only provisioning on these phones.
+
+## Current implementation review gaps
+
+Before finishing acceptance, review reset/lifecycle behavior in RelayPlugin.kt.
+A connected snapshot changing clears channel buttons, but that refresh only
+rebuilds them when its previous snapshot was null. Recovery may leave no selection
+buttons; add a regression test when fixing it. Review old worker callbacks crossing
+unload/reload and outgoing receipt-registration races as well. These are review
+follow-ups, not verified hardware failures. Do not broaden this experiment into
+production security or enrollment work.
+
+## Output locations
+
 - app/build/outputs/apk/debug/app-debug.apk
 - app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 - core/build/reports/tests/test/index.html
