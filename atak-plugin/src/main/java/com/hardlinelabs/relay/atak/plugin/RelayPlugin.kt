@@ -23,7 +23,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
 
-/** Plugin owns PLI only. Never writes radio configuration or dispatches TAK-server CoT. */
+/** Plugin owns mesh PLI and explicit points. Never writes radio configuration. */
 class RelayPlugin(services: IServiceController) : IPlugin {
     private val pluginContext = services.getService(PluginContextProvider::class.java).pluginContext
     private val map = MapView.getMapView()
@@ -32,27 +32,28 @@ class RelayPlugin(services: IServiceController) : IPlugin {
     private val handler = Handler(Looper.getMainLooper())
     private var worker = Executors.newSingleThreadExecutor()
     private val state = PliState()
+    private val session = RadioSession<Snapshot>()
     private val markers = linkedMapOf<String, Marker>()
     private val random = SecureRandom()
     @Volatile private var active = false
     private var bound = false
     private var registered = false
     private var service: IMeshService? = null
-    private var snapshot: Snapshot? = null
-    private var selected: Int? = null
     private var interval = 0
     private var nextSend = 0L
     private var lastSend = -10_000L
-    private var busy = false
-    private var queuedTransmissions = 0
-    @Volatile private var generation = 0
     private var status = "Connecting to Meshtastic…"
     private var pane: Pane? = null
     private var body: LinearLayout? = null
     private var statusText: TextView? = null
     private var peerText: TextView? = null
+    private var pointText: TextView? = null
     private var channelButtons: LinearLayout? = null
     private var lastRefresh = -5_000L
+    private val points = PointSharing(map,
+        { if (active && session.selected != null) session.snapshot?.node else null },
+        { bytes, done -> transmit(bytes, DataPacket.ID_BROADCAST, null, done) },
+        { render() })
     private val button = ToolbarItem.Builder("Hardline Relay", MarshalManager.marshal(
         pluginContext.getDrawable(android.R.drawable.ic_menu_share), android.graphics.drawable.Drawable::class.java,
         gov.tak.api.commons.graphics.Bitmap::class.java))
@@ -77,6 +78,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            if (!active) return
             service = IMeshService.Stub.asInterface(binder); refresh()
         }
         override fun onServiceDisconnected(name: ComponentName) { service = null; reset("Meshtastic service disconnected; automatic sending stopped.") }
@@ -94,15 +96,17 @@ class RelayPlugin(services: IServiceController) : IPlugin {
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (!active || selected == null) return
+            if (!active || session.selected == null) return
             try {
                 intent.setExtrasClassLoader(DataPacket::class.java.classLoader)
                 @Suppress("DEPRECATION") val packet = intent.getParcelableExtra<DataPacket>("com.geeksville.mesh.Payload") ?: return
-                if (packet.dataType != PliWire.PORT || packet.channel != selected || packet.viaMqtt) return
-                val from = packet.from ?: return
-                if (!from.matches(Regex("![0-9a-fA-F]{8}")) || from == snapshot?.node) return
-                val message = PliWire.decode(packet.bytes?.toByteArray() ?: return)
+                if (packet.dataType != PliWire.PORT || packet.channel != session.selected || packet.viaMqtt) return
+                val from = packet.from?.lowercase(Locale.ROOT) ?: return
+                if (!from.matches(Regex("![0-9a-fA-F]{8}")) || from == session.snapshot?.node) return
+                val bytes = packet.bytes?.toByteArray() ?: return
                 val now = SystemClock.elapsedRealtime()
+                if (PointWire.isPointMessage(bytes)) { points.receive(from, bytes, now); return }
+                val message = PliWire.decode(bytes)
                 when (message) {
                     is PliWire.Receipt -> if (state.receipt(message.id, from, now)) status = "Peer $from confirmed processing PLI ${shortId(message.id)}."
                     is PliWire.Position -> {
@@ -130,59 +134,63 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         if (Build.VERSION.SDK_INT >= 33) host.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
         else @Suppress("DEPRECATION") host.registerReceiver(receiver, filter)
         registered = true
+        points.start()
         connect(); handler.post(tick)
     }
     override fun onStop() {
-        active = false; generation++; interval = 0
-        worker.shutdownNow(); busy = false; queuedTransmissions = 0
+        active = false; session.reset(); interval = 0
+        worker.shutdownNow()
         handler.removeCallbacksAndMessages(null)
         if (registered) host.unregisterReceiver(receiver)
         registered = false; disconnect(); clearPeers()
+        points.stop()
         pane?.let { ui?.closePane(it) }; ui?.removeToolbarItem(button)
-        pane = null; body = null; snapshot = null; selected = null
+        pane = null; body = null
+        statusText = null; peerText = null; pointText = null; channelButtons = null
     }
     private fun clearPeers() {
         markers.values.forEach { map.rootGroup.removeItem(it) }
         markers.clear(); state.clear()
+        points.resetContacts()
     }
     private fun reset(message: String) {
-        generation++; interval = 0; selected = null; snapshot = null; clearPeers()
+        session.reset(); interval = 0; clearPeers()
         status = message; rebuildChannels(); render()
     }
     private val tick = object : Runnable {
         override fun run() {
             if (!active) return
             val now = SystemClock.elapsedRealtime()
-            if (!busy && now - lastRefresh >= 5000) { lastRefresh = now; refresh() }
-            if (interval > 0 && now >= nextSend && !busy) { nextSend = now + interval * 1000L; sendPli() }
+            if (!session.busy && now - lastRefresh >= 5000) { lastRefresh = now; refresh() }
+            if (interval > 0 && now >= nextSend && !session.busy) { nextSend = now + interval * 1000L; sendPli() }
             state.expire(now); updateMarkers(now); render()
             handler.postDelayed(this, 1000)
         }
     }
     private fun refresh() {
         val s = service ?: return
-        if (busy) return
-        busy = true
-        val epoch = generation
+        val epoch = session.beginRefresh() ?: return
         worker.execute {
             val result = runCatching { read(s) }
             handler.post {
-                busy = false
-                if (!active || epoch != generation) return@post
+                if (!active || !session.finishRefresh(epoch)) return@post
                 result.onSuccess { current ->
-                    val old = snapshot
+                    val old = session.snapshot
                     if (old != null && old != current) reset("Radio/channel changed. Select channel again; automatic sending stopped.")
-                    snapshot = current
-                    if (old == null) { status = "Radio connected (${current.node}), 7 hops. Select a private channel."; rebuildChannels() }
+                    val changed = session.observe(current)
+                    if (changed) {
+                        status = "Radio connected (${current.node}), 7 hops. Select a private channel."
+                        rebuildChannels()
+                    }
                 }.onFailure { reset(it.message ?: "Radio unavailable.") }
                 render()
             }
         }
     }
     private fun sendPli() {
-        if (selected == null) { status = "Select a private channel first."; return }
+        if (session.selected == null) { status = "Select a private channel first."; return }
         val now = SystemClock.elapsedRealtime()
-        if (busy || now - lastSend < 5000) return
+        if (session.busy || now - lastSend < 5000) return
         try {
             val self = map.selfMarker ?: error("ATAK self position unavailable.")
             val point = self.point
@@ -203,28 +211,39 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             transmit(PliWire.encode(pli), DataPacket.ID_BROADCAST, id)
         } catch (e: Exception) { status = e.message ?: "Location unavailable; no PLI sent."; render() }
     }
-    private fun transmit(bytes: ByteArray, destination: String, pliId: Long?) {
-        val s = service ?: return
-        val before = snapshot ?: return
-        val index = selected ?: return
-        val expected = before.channels.getOrNull(index) ?: return
-        val epoch = generation
-        if (queuedTransmissions >= 4) { status = "Transmit queue full; packet not submitted."; return }
-        queuedTransmissions++
+    private fun transmit(bytes: ByteArray, destination: String, pliId: Long?, done: (String?) -> Unit = {}) {
+        val s = service
+        val before = session.snapshot
+        val index = session.selected
+        if (!active || s == null || before == null || index == null) {
+            done("Radio/channel unavailable; point not submitted."); return
+        }
+        val expected = before.channels.getOrNull(index)
+        if (expected == null) { done("Channel unavailable; point not submitted."); return }
+        val epoch = session.beginTransmit()
+        if (epoch == null) {
+            status = "Transmit queue full; packet not submitted."; done(status); return
+        }
+        // Register before send: a fast receipt may arrive before the worker completion callback.
+        if (pliId != null) state.sent(pliId, SystemClock.elapsedRealtime())
         worker.execute {
             val result = runCatching {
                 val current = read(s)
                 check(current == before && privateChannel(expected)) { "Radio/channel changed; packet not submitted." }
-                check(active && epoch == generation) { "Session changed; packet not submitted." }
+                check(active && epoch == session.generation) { "Session changed; packet not submitted." }
                 s.send(DataPacket(to = destination, bytes = bytes.toByteString(), dataType = PliWire.PORT,
                     channel = index, hopLimit = current.hops, wantAck = false))
             }
             handler.post {
-                queuedTransmissions = (queuedTransmissions - 1).coerceAtLeast(0)
-                if (!active || epoch != generation) return@post
+                if (!active || !session.finishTransmit(epoch)) return@post
                 result.onSuccess {
-                    if (pliId != null) { state.sent(pliId, SystemClock.elapsedRealtime()); status = "PLI ${shortId(pliId)} submitted; awaiting plugin receipt." }
-                }.onFailure { status = it.message ?: "Packet submission failed."; interval = 0 }
+                    if (pliId != null && state.pending[pliId]?.receipts?.isEmpty() == true)
+                        status = "PLI ${shortId(pliId)} submitted; awaiting plugin receipt."
+                    done(null)
+                }.onFailure {
+                    if (pliId != null && state.pending[pliId]?.receipts?.isEmpty() == true) state.pending.remove(pliId)
+                    status = it.message ?: "Packet submission failed."; interval = 0; done(status)
+                }
                 render()
             }
         }
@@ -247,20 +266,23 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             marker.setMetaString("callsign", marker.title)
             marker.setMetaString("remarks", "Mesh-only last-known position. Fix ${Date(p.fixTime)}; received ${Date(peer.receivedWall)}. Not proof of current location.")
         }
+        points.updateContacts(state.peers, markers, now)
     }
     private fun showPane() {
         if (pane == null) {
             body = LinearLayout(host).apply { orientation = LinearLayout.VERTICAL; setPadding(16, 16, 16, 16) }
             val layout = body!!
-            layout.addView(TextView(host).apply { text = "Hardline Relay — PLI development test"; textSize = 18f })
+            layout.addView(TextView(host).apply { text = "Hardline Relay — mesh development test"; textSize = 18f })
             statusText = TextView(host); layout.addView(statusText)
+            pointText = TextView(host).apply { textSize = 16f; setPadding(0, 16, 0, 16) }
+            layout.addView(pointText)
             addButton(layout, "Reconnect / refresh") { if (service == null) { disconnect(); connect() }; refresh() }
             channelButtons = LinearLayout(host).apply { orientation = LinearLayout.VERTICAL }; layout.addView(channelButtons)
             addButton(layout, "Send PLI now") { sendPli() }
             val modes = LinearLayout(host)
             listOf("Off" to 0, "Every 10s" to 10, "Every 30s" to 30).forEach { (label, seconds) ->
                 addButton(modes, label) {
-                    if (seconds == 0 || selected != null) { interval = seconds; nextSend = SystemClock.elapsedRealtime() + seconds * 1000L }
+                    if (seconds == 0 || session.selected != null) { interval = seconds; nextSend = SystemClock.elapsedRealtime() + seconds * 1000L }
                     else status = "Select a private channel first."
                     render()
                 }
@@ -279,10 +301,10 @@ class RelayPlugin(services: IServiceController) : IPlugin {
     }
     private fun rebuildChannels() {
         channelButtons?.removeAllViews()
-        snapshot?.channels?.forEachIndexed { index, c ->
+        session.snapshot?.channels?.forEachIndexed { index, c ->
             if (index > 0 && privateChannel(c)) channelButtons?.let { layout ->
                 addButton(layout, "Use ${c.name}") {
-                    generation++; interval = 0; clearPeers(); selected = index
+                    session.select(index); interval = 0; clearPeers()
                     status = "Selected ${c.name}. Receiving PLI; automatic sending Off."; render()
                 }
             }
@@ -290,7 +312,29 @@ class RelayPlugin(services: IServiceController) : IPlugin {
     }
     private fun render() {
         val now = SystemClock.elapsedRealtime()
-        val name = selected?.let { snapshot?.channels?.getOrNull(it)?.name } ?: "none"
+        points.last.tick(now)
+        val lastPoint = points.last
+        val label = when (lastPoint.status) {
+            PointSendState.Status.NONE -> "NONE"
+            PointSendState.Status.SUBMITTING -> "SUBMITTING"
+            PointSendState.Status.AWAITING -> "AWAITING RECEIPT"
+            PointSendState.Status.RECEIVED -> "RECEIVED"
+            PointSendState.Status.UNCONFIRMED -> "UNCONFIRMED"
+            PointSendState.Status.FAILED -> "SEND FAILED"
+        }
+        pointText?.text = buildString {
+            append("Last point: $label\n")
+            lastPoint.point?.let { append("${it.name} → ${lastPoint.recipientName}\n") }
+            append(lastPoint.detail)
+        }
+        pointText?.setTextColor(when (lastPoint.status) {
+            PointSendState.Status.RECEIVED -> android.graphics.Color.rgb(100, 220, 140)
+            PointSendState.Status.FAILED -> android.graphics.Color.rgb(255, 130, 130)
+            PointSendState.Status.UNCONFIRMED, PointSendState.Status.AWAITING,
+            PointSendState.Status.SUBMITTING -> android.graphics.Color.rgb(255, 210, 100)
+            PointSendState.Status.NONE -> android.graphics.Color.LTGRAY
+        })
+        val name = session.selected?.let { session.snapshot?.channels?.getOrNull(it)?.name } ?: "none"
         statusText?.text = "$status\nChannel: $name | Auto: ${if (interval == 0) "Off" else "${interval}s"}\nTAK server connections unchanged."
         val time = SimpleDateFormat("HH:mm:ss", Locale.US)
         peerText?.text = buildString {

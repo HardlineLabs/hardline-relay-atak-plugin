@@ -77,15 +77,36 @@ ATAK's map/toolbars are partly canvas-based; empty UI text is not proof of a cra
 Check loading/screen wake state before interacting. Physical permission prompts
 are for the creator; do not reuse emulator-only provisioning on these phones.
 
-## Current implementation review gaps
+## Compact point acceptance
 
-Before finishing acceptance, review reset/lifecycle behavior in RelayPlugin.kt.
-A connected snapshot changing clears channel buttons, but that refresh only
-rebuilds them when its previous snapshot was null. Recovery may leave no selection
-buttons; add a regression test when fixing it. Review old worker callbacks crossing
-unload/reload and outgoing receipt-registration races as well. These are review
-follow-ups, not verified hardware failures. Do not broaden this experiment into
-production security or enrollment work.
+Use 0.3.0-dev (3) on both SDK hosts. Verify the installed hash recorded in the
+workstation inventory; a version name alone is not sufficient during development.
+
+1. Keep both automatic PLI modes Off and select the existing private channel.
+   Send one real manual PLI each way; require both application receipts.
+2. Create a basic named spot/ground marker in ATAK. Use its normal Send control,
+   choose the peer labelled `[Relay]` and Send. Do not choose an unrelated ordinary
+   TAK contact. A stale Relay contact remains labelled STALE but can be attempted.
+3. Open Hardline Relay on the sender. Require Last point: RECEIVED for that point
+   and selected peer. On the recipient, inspect the actual map marker's name,
+   location and symbol/color. It must not be labelled as live PLI. Repeat in reverse.
+4. Edit/resend that source marker: require one updated recipient marker. Test
+   another channel member separately for recipient filtering; two phones alone
+   do not prove a third peer's behavior. JVM tests cover the filtering decision.
+5. With no receiving plugin, send once and require UNCONFIRMED after 60 seconds,
+   never a claim of proven loss. Resume reception and explicitly resend if needed.
+   Do not use repeated automatic retries. Long names/unsupported selections must
+   fail visibly. PLI traffic must not overwrite the last-point indicator.
+6. Reload/restart and reconnect separately. Contacts are rebuilt from fresh PLI;
+   auto sending remains Off. Received points and last-point status are currently
+   session-only. Remove test source markers after acceptance; never log coordinates.
+
+Core tests exercise packet bounds/UTF-8, recipient and receipt filtering, duplicate
+re-ack, revision ordering, timeout/late receipt, failed imports and history bounds.
+RadioSession tests cover rebuilding channel choices on a connected snapshot change
+and rejecting old worker callbacks after session reset. PLI pending tokens are now
+registered before submitting to the worker, preventing early receipt overwrite.
+These tests do not substitute for host UI, RF, BLE or production-host acceptance.
 
 ## Output locations
 
