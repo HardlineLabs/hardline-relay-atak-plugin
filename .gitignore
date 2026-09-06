@@ -1,0 +1,15 @@
+.gradle/
+.kotlin/
+.takdev/
+**/build/
+local.properties
+.idea/
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.hprof
+artifacts/
+local/
+__pycache__/

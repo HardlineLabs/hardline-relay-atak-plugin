@@ -1,0 +1,72 @@
+// Local official SDK only. No TAK account credentials or remote artifact requests.
+buildscript {
+    ext.ATAK_VERSION = '5.6.0'
+    ext.PLUGIN_VERSION = '0.1.0'
+    ext.isDevKitEnabled = { -> false }
+    ext.sdkPath = System.getenv('ATAK_SDK_ROOT')
+    ext.takdevConTestEnable = 'false'
+    // Required by the SDK plugin even in offline-SDK mode; never real credentials.
+    ext.takrepoUrl = 'https://localhost/'
+    ext.takrepoUser = 'invalid'
+    ext.takrepoPassword = 'invalid'
+    ext.takdevPlugin = System.getenv('ATAK_SDK_ROOT') + '/atak-gradle-takdev.jar'
+    dependencies { classpath files(takdevPlugin) }
+}
+
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'atak-takdev-plugin'
+repositories { google(); mavenCentral() }
+
+android {
+    namespace 'com.hardlinelabs.relay.atak.plugin'
+    compileSdk 36
+    buildToolsVersion '36.0.0'
+    defaultConfig {
+        applicationId 'com.hardlinelabs.relay.atak.plugin'
+        minSdk 26
+        targetSdk 34
+        versionCode 4
+        versionName '0.4.0'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig true }
+    bundle { storeArchive { enable = false } }
+    packaging { jniLibs { useLegacyPackaging = true } }
+    signingConfigs {
+        debug {
+            storeFile file(System.getenv('ATAK_SDK_ROOT') + '/android_keystore')
+            // Public SDK test key, NOT a product secret or a production signing identity.
+            storePassword 'tnttnt'
+            keyAlias 'wintec_mapping'
+            keyPassword 'tnttnt'
+        }
+    }
+    buildTypes {
+        debug { debuggable true; matchingFallbacks = ['sdk'] }
+        release { minifyEnabled true }
+    }
+    flavorDimensions 'application'
+    productFlavors {
+        civ {
+            dimension 'application'
+            manifestPlaceholders = [atakApiVersion: 'com.atakmap.app@5.6.0.CIV']
+        }
+    }
+}
+
+dependencies {
+    implementation project(':core')
+    implementation 'com.github.meshtastic.Meshtastic-Android:meshtastic-android-api:v2.7.13'
+}
+repositories {
+    maven { url 'https://jitpack.io'; content { includeGroup 'com.github.meshtastic.Meshtastic-Android' } }
+}
+
+// The environment is for SDK-host development only. Release/signing needs approval.
+androidComponents {
+    beforeVariants(selector().withBuildType('release')) { variant -> variant.enable = false }
+}
