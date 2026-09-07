@@ -28,6 +28,7 @@ internal class PointSharing(
     private val received = PointReceiveState()
     private val contacts = linkedMapOf<String, IndividualContact>()
     private val contactStaleness = mutableMapOf<String, Boolean>()
+    private val chatContacts = mutableSetOf<String>()
     private val pointMarkers = linkedMapOf<String, Marker>()
     private val random = SecureRandom()
     private var started = false
@@ -81,12 +82,13 @@ internal class PointSharing(
         retryMarker = null; retryNode = null
         contacts.values.forEach { Contacts.getInstance().removeContact(it) }
         contacts.clear()
+        chatContacts.clear()
         contactStaleness.clear()
         last.interrupted()
     }
 
     fun updateContacts(peers: Map<String, PliState.Peer>, markers: Map<String, Marker>, now: Long) {
-        contacts.keys.filter { it !in peers }.toList().forEach { node ->
+        contacts.keys.filter { it !in peers && it !in chatContacts }.toList().forEach { node ->
             contacts.remove(node)?.let { Contacts.getInstance().removeContact(it) }
             contactStaleness.remove(node)
         }
@@ -95,6 +97,7 @@ internal class PointSharing(
                 IndividualContact("${peer.pli.callsign} [Relay]", "hardline-relay:$node", markers[node]).apply {
                     // A send-intent IP connector appears in ATAK's standard point recipient picker.
                     addConnector(IpConnector(SEND))
+                    addConnector(ChatSharing.connector())
                     Contacts.getInstance().addContact(this)
                 }
             }
@@ -104,6 +107,19 @@ internal class PointSharing(
             if (contactStaleness.put(node, stale) != stale) {
                 if (stale) contact.stale() else contact.current()
             }
+        }
+    }
+
+    fun chatContact(node: String, callsign: String) {
+        check(node in contacts || contacts.size < 64) { "Relay contact limit reached." }
+        chatContacts.add(node)
+        if (node !in contacts) {
+            val contact = IndividualContact("$callsign [Relay]", "hardline-relay:$node").apply {
+                addConnector(ChatSharing.connector())
+                addConnector(IpConnector(SEND))
+            }
+            contacts[node] = contact
+            Contacts.getInstance().addContact(contact)
         }
     }
 

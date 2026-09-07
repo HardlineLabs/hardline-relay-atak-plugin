@@ -42,6 +42,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
     private var service: IMeshService? = null
     private var interval = 0
     private var nextSend = 0L
+    private var ackWait = 120
     private var lastSend = -10_000L
     private var status = "Connecting to Meshtastic…"
     private var pane: Pane? = null
@@ -49,12 +50,16 @@ class RelayPlugin(services: IServiceController) : IPlugin {
     private var statusText: TextView? = null
     private var peerText: TextView? = null
     private var pointText: TextView? = null
+    private var chatText: TextView? = null
     private var channelButtons: LinearLayout? = null
     private var lastRefresh = -5_000L
     private val points = PointSharing(map,
         { if (active && session.selected != null) session.snapshot?.node else null },
         { bytes, done -> transmit(bytes, DataPacket.ID_BROADCAST, null, done) },
         { render() })
+    private val chat = ChatSharing(map,
+        { if (active && session.selected != null) session.snapshot?.node else null },
+        { bytes, done -> transmit(bytes, DataPacket.ID_BROADCAST, null, done) }, points::chatContact, { render() })
     private val button = ToolbarItem.Builder("Hardline Relay", MarshalManager.marshal(
         pluginContext.getDrawable(R.drawable.ic_hardline), android.graphics.drawable.Drawable::class.java,
         gov.tak.api.commons.graphics.Bitmap::class.java))
@@ -106,6 +111,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
                 if (!from.matches(Regex("![0-9a-fA-F]{8}")) || from == session.snapshot?.node) return
                 val bytes = packet.bytes?.toByteArray() ?: return
                 val now = SystemClock.elapsedRealtime()
+                if (ChatWire.isChat(bytes)) { chat.receive(from, bytes, now); return }
                 if (PointWire.isPointMessage(bytes)) {
                     val previous = points.last.status
                     points.receive(from, bytes, now)
@@ -141,6 +147,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         else @Suppress("DEPRECATION") host.registerReceiver(receiver, filter)
         registered = true
         points.start()
+        chat.start()
         indicator = MeshIndicator(map) { showPane() }.also { it.start() }
         connect(); handler.post(tick)
     }
@@ -151,15 +158,17 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         if (registered) host.unregisterReceiver(receiver)
         registered = false; disconnect(); clearPeers()
         points.stop()
+        chat.stop()
         indicator?.stop(); indicator = null
         pane?.let { ui?.closePane(it) }; ui?.removeToolbarItem(button)
         pane = null; body = null
-        statusText = null; peerText = null; pointText = null; channelButtons = null
+        statusText = null; peerText = null; pointText = null; chatText = null; channelButtons = null
     }
     private fun clearPeers() {
         markers.values.forEach { map.rootGroup.removeItem(it) }
         markers.clear(); state.clear(); receipts.clear(); lastPointProof = -1L
         points.resetContacts()
+        chat.reset()
     }
     private fun reset(message: String) {
         session.reset(); interval = 0; clearPeers()
@@ -170,7 +179,8 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             if (!active) return
             val now = SystemClock.elapsedRealtime()
             if (!session.busy && now - lastRefresh >= 5000) { lastRefresh = now; refresh() }
-            if (interval > 0 && now >= nextSend && !session.busy) { nextSend = now + interval * 1000L; sendPli() }
+            state.waiting(now, ackWait * 1000L)
+            if (interval > 0 && now >= nextSend && !session.busy) sendPli()
             if (session.selected != null && !session.busy) receipts.poll(now)?.let { transmit(PliWire.ack(it), DataPacket.ID_BROADCAST, null) }
             state.expire(now); updateMarkers(now); render()
             handler.postDelayed(this, 1000)
@@ -228,12 +238,17 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         if (session.selected == null) { status = "Select a private channel first."; return }
         val now = SystemClock.elapsedRealtime()
         if (session.busy || now - lastSend < 5000) return
+        if (state.waiting(now, ackWait * 1000L) != null) {
+            status = "Previous PLI is awaiting a receipt. Latest position will be sent when the wait ends."
+            render(); return
+        }
         try {
             val (point, fix) = positionFix()
             var id = random.nextLong(); while (id == 0L) id = random.nextLong()
             val name = map.deviceCallsign.take(20).ifBlank { "Relay" }
             val pli = Pli(id, fix.time, point.latitude, point.longitude, interval, name)
             lastSend = now
+            nextSend = now + interval * 1000L
             positionIssue = null
             transmit(PliWire.encode(pli), DataPacket.ID_BROADCAST, id)
         } catch (e: Exception) { positionIssue = e.message ?: "No fresh GPS fix; PLI paused."; status = positionIssue!!; render() }
@@ -330,10 +345,11 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         val widget = Spinner(host).apply { setBackgroundColor(android.graphics.Color.rgb(44,67,73)) }
         val adapter = object : ArrayAdapter<String>(host, android.R.layout.simple_spinner_item, labels) {
             override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View =
-                super.getView(position, convertView, parent).apply { (this as TextView).setTextColor(ink); text = "${getItem(position)} ▾"; isSingleLine = true; ellipsize = android.text.TextUtils.TruncateAt.END; textSize = 14f; setPadding(dp(6), dp(6), dp(6), dp(6)) }
+                super.getView(position, convertView, parent).apply { (this as TextView).setTextColor(ink); text = "${getItem(position)} ▾"; isSingleLine = false; ellipsize = null; textSize = 15f; minHeight = dp(48); setPadding(dp(10), dp(10), dp(10), dp(10)) }
             override fun getDropDownView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View =
                 super.getDropDownView(position, convertView, parent).apply {
                     (this as TextView).setTextColor(ink); setBackgroundColor(android.graphics.Color.rgb(25,35,42))
+                    isSingleLine = false; ellipsize = null; textSize = 15f; minHeight = dp(48)
                     setPadding(dp(12), dp(16), dp(12), dp(16))
                 }
         }
@@ -356,10 +372,10 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             val layout = body!!
             text(layout, "HARDLINE  /  RELAY", 18f, accent).typeface = android.graphics.Typeface.DEFAULT_BOLD
             val control = card(layout)
-            val choices = LinearLayout(host)
+            val choices = column()
             control.addView(choices)
-            val channels = column(); choices.addView(channels, LinearLayout.LayoutParams(0, -2, 1f))
-            val reporting = column(); choices.addView(reporting, LinearLayout.LayoutParams(0, -2, 1f))
+            val channels = column(); choices.addView(channels, LinearLayout.LayoutParams(-1, -2))
+            val reporting = column(); choices.addView(reporting, LinearLayout.LayoutParams(-1, -2))
             text(channels, "CHANNEL", 11f, muted)
             channelButtons = column(); channels.addView(channelButtons)
             text(reporting, "REPORTING", 11f, muted)
@@ -373,6 +389,12 @@ class RelayPlugin(services: IServiceController) : IPlugin {
                 } else status = "Select a connected channel first."
                 render()
             }
+            text(reporting, "PLI ACK WAIT / RETRY", 11f, muted)
+            val waits = listOf(30, 60, 120, 180, 300)
+            spinner(reporting, listOf("30 seconds", "1 minute", "2 minutes", "3 minutes", "5 minutes"), waits.indexOf(ackWait)) {
+                ackWait = waits[it]; render()
+            }
+            text(reporting, "One PLI at a time. Overdue updates wait for a peer receipt or this deadline, then send the newest position.", 12f, muted)
             val actions = LinearLayout(host); control.addView(actions)
             addButton(actions, "Send PLI now") { sendPli() }
             addButton(actions, "Pause PLI") { interval = 0; status = "Automatic PLI paused."; render() }
@@ -384,6 +406,8 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             gpsText = text(summary, "", 13f, muted)
             myPliText = text(summary, "", 13f)
             pointText = text(summary, "", 13f)
+            chatText = text(summary, "", 13f)
+            text(summary, "Chat from ATAK's normal contact conversation · 160 UTF-8 bytes per message · Private Relay channel only", 12f, muted)
             retryButton = addButton(summary, "Retry last point") { points.retry() }
             peerText = text(summary, "", 13f)
             diagnostics = text(summary, "", 13f, muted)
@@ -457,6 +481,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
     private fun render() {
         val now = SystemClock.elapsedRealtime()
         points.last.tick(now)
+        chat.tick(now); chatText?.text = chat.status
         val p = points.last
         val gps = runCatching { positionFix().second }
         positionIssue = gps.exceptionOrNull()?.message
@@ -470,7 +495,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             PointSendState.Status.UNCONFIRMED -> "Unconfirmed"
             PointSendState.Status.FAILED -> "Send failed"
         }
-        pointText?.text = "Last point · $label" + (p.point?.let { "\n${it.name} → ${p.recipientName}" } ?: "")
+        pointText?.text = "Last point · $label" + (p.point?.let { "\n${it.name} → ${p.recipientName}" } ?: "") + "\n" + roundTripText(p.roundTrips)
         pointText?.setTextColor(when (p.status) {
             PointSendState.Status.RECEIVED -> accent
             PointSendState.Status.FAILED -> android.graphics.Color.rgb(255,130,130)
@@ -479,7 +504,8 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         })
         val recent = state.peers.values.any { !it.stale(now) } ||
             (state.lastConfirmation >= 0 && now - state.lastConfirmation < maxOf(60_000L, interval * 3000L)) ||
-            (lastPointProof >= 0 && now - lastPointProof < 60_000L)
+            (lastPointProof >= 0 && now - lastPointProof < 60_000L) ||
+            (chat.lastProof >= 0 && now - chat.lastProof < 60_000L)
         val health = if (profileSwitching || catalogIssue != null) MeshHealth.State.WAITING else MeshHealth.assess(session.snapshot != null && service != null, session.selected != null,
             recent, interval > 0 && positionIssue != null)
         indicator?.update(health)
@@ -492,13 +518,21 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         val name = session.selected?.let { session.snapshot?.channels?.getOrNull(it)?.name } ?: "None"
         statusText?.text = "$name · ${if (interval == 0) "PLI off" else "PLI every ${interval}s"}"
         val sent = state.latest
-        myPliText?.text = if (sent == null) "My PLI · No report this session" else
-            "My PLI · ${age(now - sent.at)} ago · " + when {
-                sent.receipts.isNotEmpty() -> "Confirmed by ${sent.receipts.size}"
-                sent.failure != null -> "Send failed"
-                now - sent.at < 60_000 -> "Awaiting receipt"
-                else -> "Unconfirmed"
-            } + if (state.lastConfirmation >= 0) "\nLast confirmation ${age(now - state.lastConfirmation)} ago" else ""
+        val waiting = state.waiting(now, ackWait * 1000L)
+        myPliText?.text = buildString {
+            append("My PLI · ")
+            append(if (sent == null) "No report this session" else pliAttempt(sent, now))
+            if (waiting != null) {
+                append("\nACK deadline in ${age(ackWait * 1000L - (now - waiting.at))}")
+                if (interval > 0 && now >= nextSend) append(" · Next update held")
+            }
+            state.pending.values.toList().takeLast(4).filter { it.id != sent?.id }.reversed().forEach {
+                append("\nPrevious ${shortId(it.id)} · ${pliAttempt(it, now)}")
+            }
+            append("\nLast confirmed · ").append(if (state.lastConfirmation >= 0) "${age(now - state.lastConfirmation)} ago" else "None this session")
+            append("\n").append(roundTripText(state.roundTrips))
+            append("\n${state.unanswered} unanswered in retained attempts · Silence does not prove loss")
+        }
         peerText?.text = buildString {
             val overdue = state.peers.values.count { it.stale(now) }
             append("Contacts · ${state.peers.size - overdue} reporting · $overdue overdue")
@@ -522,5 +556,15 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         val mode = PliWire.intervals.indexOf(interval)
         if (intervalSpinner?.selectedItemPosition != mode) intervalSpinner?.setSelection(mode, false)
         syncingControls = false
+    }
+    private fun pliAttempt(sent: PliState.Sent, now: Long) = when {
+        sent.receipts.isNotEmpty() -> "Confirmed by ${sent.receipts.size} · sent ${age(now - sent.at)} ago"
+        sent.failure != null -> "Send failed · ${age(now - sent.at)} ago"
+        sent.deadlineReached -> "Unconfirmed · acknowledgment deadline reached"
+        else -> "Waiting ${age(now - sent.at)} for peer receipt"
+    }
+    private fun roundTripText(stats: RoundTrips): String {
+        fun seconds(ms: Long?) = ms?.let { String.format(Locale.US, "%.1fs", it / 1000.0) } ?: "—"
+        return "Avg round trip ${seconds(stats.average)} · ${stats.count} samples\nLatest ${seconds(stats.latest)} · Longest ${seconds(stats.longest)}"
     }
 }
