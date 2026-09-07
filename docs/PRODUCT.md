@@ -127,6 +127,13 @@ Closing the receiving ATAK produced an unconfirmed point; restart and manual Ret
 produced Received. Bluetooth loss showed a red badge and cleared selection;
 reconnection/reselection restored traffic while automatic reporting remained Off. See DEVELOPMENT.md for repeatable acceptance procedures.
 
+Version 0.5 acceptance on this pair also verified native one-to-one ATAK chat and
+DELIVERED receipts in both directions on a private channel, separate PLI and point
+round-trip displays, and readable timing menus. With the receiving ATAK stopped,
+a ten-second reporting interval held its next update behind a thirty-second ACK
+deadline. The old attempt remained visibly unconfirmed when the newest position
+was sent; Pause stopped further scheduled sends. No public-room chat was sent.
+
 JVM tests cover wire bounds, addressing, revision ordering, late/duplicate receipts,
 stale transitions, all interval values, bounded receipt scheduling, session resets
 and submission/receipt races. Build/lint and physical host tests are separate.

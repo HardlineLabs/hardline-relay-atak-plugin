@@ -239,7 +239,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         val now = SystemClock.elapsedRealtime()
         if (session.busy || now - lastSend < 5000) return
         if (state.waiting(now, ackWait * 1000L) != null) {
-            status = "Previous PLI is awaiting a receipt. Latest position will be sent when the wait ends."
+            status = "Previous PLI is awaiting a receipt. Wait for confirmation or the ACK deadline before sending again."
             render(); return
         }
         try {
