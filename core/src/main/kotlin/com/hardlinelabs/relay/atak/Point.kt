@@ -91,6 +91,9 @@ object PointWire {
 
 /** Latest attempt remains visible; unrelated/older receipts cannot overwrite it. */
 class PointSendState {
+    private data class Attempt(val recipient: Long, val at: Long, var confirmed: Boolean = false)
+    private val attempts = linkedMapOf<Long, Attempt>()
+    val roundTrips = RoundTrips()
     enum class Status { NONE, SUBMITTING, AWAITING, RECEIVED, UNCONFIRMED, FAILED }
     var status = Status.NONE; private set
     var point: MeshPoint? = null; private set
@@ -100,11 +103,15 @@ class PointSendState {
     private var receiptEligible = false
 
     fun clear() {
+        attempts.clear(); roundTrips.clear()
         status = Status.NONE; point = null; recipientName = ""
         detail = "No point sent this session."; receiptEligible = false
     }
 
     fun begin(point: MeshPoint, recipientName: String, now: Long) {
+        attempts.entries.removeAll { now - it.value.at > 300_000 }
+        attempts[point.token] = Attempt(point.recipient, now)
+        while (attempts.size > 32) attempts.remove(attempts.keys.first())
         this.point = point; this.recipientName = recipientName; startedAt = now
         receiptEligible = true
         status = Status.SUBMITTING; detail = "Submitting to radio…"
@@ -122,6 +129,9 @@ class PointSendState {
         receiptEligible = false
     }
     fun receipt(token: Long, from: Long, now: Long): Boolean {
+        attempts[token]?.takeIf { !it.confirmed && it.recipient == from && now - it.at in 0..300_000 }?.let {
+            it.confirmed = true; roundTrips.add(now - it.at)
+        }
         val p = point ?: return false
         if (!receiptEligible || p.token != token || p.recipient != from || now - startedAt !in 0..300_000 ||
             status !in listOf(Status.SUBMITTING, Status.AWAITING, Status.UNCONFIRMED)) return false
@@ -134,6 +144,7 @@ class PointSendState {
         }
     }
     fun interrupted() {
+        attempts.clear(); roundTrips.clear()
         receiptEligible = false
         if (status in listOf(Status.SUBMITTING, Status.AWAITING)) {
             status = Status.UNCONFIRMED; detail = "Connection/channel changed; delivery is unknown."

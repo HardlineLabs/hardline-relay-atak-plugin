@@ -56,7 +56,10 @@ class PliState {
         fun age(now: Long) = ((now - receivedAt).coerceAtLeast(0) / 1000)
         fun stale(now: Long) = now - receivedAt >= maxOf(60_000L, pli.interval * 3_000L)
     }
-    data class Sent(val id: Long, val at: Long, val receipts: MutableSet<String> = linkedSetOf(), var failure: String? = null)
+    data class Sent(val id: Long, val at: Long, val receipts: MutableSet<String> = linkedSetOf(),
+                    var failure: String? = null, var deadlineReached: Boolean = false)
+    val roundTrips = RoundTrips()
+    val unanswered get() = pending.values.count { it.deadlineReached && it.receipts.isEmpty() }
     val peers = linkedMapOf<String, Peer>()
     val pending = linkedMapOf<Long, Sent>()
     var latest: Sent? = null
@@ -64,6 +67,13 @@ class PliState {
     var lastConfirmation = -1L
         private set
     private val seen = linkedMapOf<String, Long>()
+    /** Only the latest attempt can hold the timer; a late receipt belongs to its original attempt. */
+    fun waiting(now: Long, waitMillis: Long): Sent? {
+        val attempt = latest ?: return null
+        if (attempt.receipts.isNotEmpty() || attempt.failure != null || attempt.deadlineReached) return null
+        if (now - attempt.at >= waitMillis) { attempt.deadlineReached = true; return null }
+        return attempt
+    }
     fun sent(id: Long, now: Long) {
         expire(now)
         pending[id] = Sent(id, now)
@@ -74,7 +84,12 @@ class PliState {
         expire(now)
         val sent = pending[id] ?: return false
         if (sent.receipts.size >= 32) return false
-        return sent.receipts.add(from).also { if (it) { lastConfirmation = now; sent.failure = null } }
+        if (now < sent.at) return false
+        val first = sent.receipts.isEmpty()
+        return sent.receipts.add(from).also { if (it) {
+            if (first) roundTrips.add(now - sent.at)
+            lastConfirmation = now; sent.failure = null
+        } }
     }
     fun failed(id: Long, reason: String) { pending[id]?.takeIf { it.receipts.isEmpty() }?.failure = reason }
     fun accept(from: String, p: Pli, now: Long, wall: Long): Boolean {
@@ -95,5 +110,5 @@ class PliState {
         seen.entries.removeAll { now - it.value > 300_000 }
         pending.entries.removeAll { now - it.value.at > 300_000 }
     }
-    fun clear() { peers.clear(); pending.clear(); seen.clear(); latest = null; lastConfirmation = -1 }
+    fun clear() { peers.clear(); pending.clear(); seen.clear(); latest = null; lastConfirmation = -1; roundTrips.clear() }
 }

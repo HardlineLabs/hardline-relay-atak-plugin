@@ -4,6 +4,32 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PliTest {
+    @Test fun intervalCannotOverrunAckWaitAndLateReceiptDoesNotReleaseNewerAttempt() {
+        val s = PliState()
+        s.sent(1, 0)
+        assertEquals(1L, s.waiting(60_000, 120_000)?.id)
+        assertNull(s.waiting(120_000, 120_000))
+        assertTrue(s.pending.getValue(1).deadlineReached)
+        s.sent(2, 120_000)
+        assertTrue(s.receipt(1, "peer", 130_000))
+        assertEquals(2L, s.waiting(130_000, 120_000)?.id)
+        assertTrue(s.receipt(2, "peer", 140_000))
+        assertNull(s.waiting(140_000, 120_000))
+        assertEquals(75_000L, s.roundTrips.average)
+        assertEquals(2, s.roundTrips.count)
+        assertFalse(s.receipt(2, "peer", 150_000))
+        assertTrue(s.receipt(2, "another", 160_000))
+        assertEquals("One RTT sample per PLI attempt", 2, s.roundTrips.count)
+    }
+    @Test fun confirmationReleasesOverdueUpdateBeforeDeadline() {
+        val s = PliState(); s.sent(1, 0)
+        assertNotNull(s.waiting(60_000, 120_000))
+        assertTrue(s.receipt(1, "peer", 80_000))
+        assertNull(s.waiting(80_000, 120_000))
+        assertFalse(s.latest!!.deadlineReached)
+        assertEquals(80_000L, s.roundTrips.latest)
+        s.clear(); assertEquals(0, s.roundTrips.count)
+    }
     private val p = Pli(42, 100_000, 40.1234567, -75.1234567, 10, "HLM1")
     @Test fun wireRoundTrip() { assertEquals(PliWire.Position(p), PliWire.decode(PliWire.encode(p))) }
     @Test fun receiptRoundTrip() { assertEquals(PliWire.Receipt(42), PliWire.decode(PliWire.ack(42))) }

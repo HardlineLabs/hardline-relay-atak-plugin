@@ -91,7 +91,21 @@ separate workflow.
 
 ## Compact point acceptance
 
-Use 0.4.0 (4) on both SDK hosts. Verify the installed hash recorded in the
+For 0.5, also verify PLI interval/ACK wait independently: keep one receiving plugin
+closed, set a short normal interval and a longer ACK deadline, and require exactly
+one waiting attempt with held updates until the deadline. The retry must have a
+new token and current GPS fix; restore the receiver and require a matched receipt.
+Leave both senders Off afterward. JVM tests cover matching late receipts to old
+attempts without releasing a newer wait, duplicate exclusion and separate RTT means.
+
+For chat, receive PLI to discover each Relay contact, open that contact's native
+ATAK conversation, and send one short message each way on the selected private
+channel. Verify the received conversation and sender DELIVERED receipt; never use
+All Chat Rooms/public channels. Check oversized UTF-8 text is rejected visibly.
+No local submission or phone-to-phone TAK network delivery substitutes for a
+matching Relay receipt. Check that normal non-Relay contacts are not intercepted.
+
+Use 0.5.0 (5) on both SDK hosts. Verify the installed hash recorded in the
 workstation inventory; a version name alone is not sufficient during development.
 
 1. Keep both automatic PLI modes Off and select the existing private channel.
