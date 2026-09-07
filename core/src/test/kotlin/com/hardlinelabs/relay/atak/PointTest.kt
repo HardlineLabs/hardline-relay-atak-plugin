@@ -64,8 +64,16 @@ class PointTest {
         s.begin(p.copy(token = 8), "B", 1000)
         s.submitted(7); s.failed(7, "old failure")
         assertFalse(s.receipt(7, 2, 2000))
+        assertEquals(1, s.roundTrips.count)
+        assertEquals(2000L, s.roundTrips.average)
+        assertFalse(s.receipt(7, 2, 2100))
+        assertEquals(1, s.roundTrips.count)
         assertEquals(PointSendState.Status.SUBMITTING, s.status)
         s.submitted(8); assertEquals(PointSendState.Status.AWAITING, s.status)
+        assertTrue(s.receipt(8, 2, 4000))
+        assertEquals(2, s.roundTrips.count)
+        assertEquals(2500L, s.roundTrips.average)
+        s.interrupted(); assertEquals(0, s.roundTrips.count)
     }
 
     @Test fun timeoutIsUnknownAndLateReceiptCanConfirmWithinHistory() {

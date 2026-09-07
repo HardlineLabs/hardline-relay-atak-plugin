@@ -8,7 +8,7 @@ positions must not look like proof that a peer is still actively sending.
 ## Operation
 
 The optional :atak-plugin module targets ATAK CIV API 5.6.0 using the local
-5.6.0.23 SDK development host. Version 0.4.0 (4) binds independently to
+5.6.0.23 SDK development host. Version 0.5.0 (5) binds independently to
 Meshtastic Android 2.7.13 IMeshService using the ATAK host Context. Meshtastic
 owns BLE. The plugin reads channel configuration transiently (including keys for
 change detection), never persists it, and never writes radio configuration.
@@ -22,9 +22,39 @@ and remains Off afterward. Installed keys alone do not establish the profile's R
 
 Reporting choices are Off / Manual, 10s, 30s, 1m, 2m, 5m and 10m. Short intervals
 consume more airtime; start with a slower cadence for larger meshes. Send PLI now
-sends a single report. Closing the pane leaves an enabled timer running; Pause PLI
+sends a single report when no previous report is waiting. Closing the pane leaves an enabled timer running; Pause PLI
 stops it. Plugin unload, detected disconnection or radio/channel changes stop
 automatic sending and reset the session. There are no catch-up bursts.
+
+Channel, interval and ACK-wait menus use full-width rows with wrapping labels.
+PLI ACK wait / retry defaults to two minutes, with 30s/1m/2m/3m/5m choices.
+Only one attempt waits at a time. If a scheduled update is overdue, a matching receipt
+releases it; otherwise the deadline marks the old attempt unconfirmed and releases
+the newest GPS position under a new token. Previous attempts stay visible and late
+ACKs cannot clear a newer wait. Silence cannot distinguish packet loss from a lost
+receipt or delay. The pane shows wait age, remaining deadline, held updates,
+last-confirmed age, unanswered retained attempts, and independent PLI/point average,
+latest and longest round trips with sample counts. Each keeps the last 32 matched
+attempts in the current radio session; PLI uses the first peer receipt per attempt.
+
+## ATAK chat
+
+Select a `[Relay]` contact in ATAK's normal chat interface. Explicit one-to-one text
+uses the selected private channel; receiving creates a normal ATAK conversation
+and returns a processing receipt. DELIVERED means the recipient plugin stored it;
+READ is never inferred. The plugin shows unconfirmed after two minutes without a
+receipt. Chat does not need a new GPS fix once a contact is available. PLI initially
+discovers contacts; received chats can establish reply contacts too.
+
+Messages are limited to 160 UTF-8 bytes (fewer characters with emoji/non-ASCII).
+Oversized messages produce an error and are not truncated or split. There is no
+public-room forwarding, group fan-out, attachment transport, automatic resend or
+TAK-server bridge. Other members of the private channel can decrypt radio packets;
+only the addressed plugin imports the conversation. Both users require plugin 0.5.
+ATAK owns persistent conversation history; the plugin's pending delivery records
+reset when the radio session changes. See the [chat contract](../protocol/chat-v1.md).
+
+## Status and positions
 
 The compact pane shows GPS freshness, your latest PLI/last confirmation, the latest
 point attempt, and every contact's position age. Overdue contacts sort first.
@@ -96,6 +126,13 @@ A ten-minute scheduled PLI arrived and was confirmed after the full interval.
 Closing the receiving ATAK produced an unconfirmed point; restart and manual Retry
 produced Received. Bluetooth loss showed a red badge and cleared selection;
 reconnection/reselection restored traffic while automatic reporting remained Off. See DEVELOPMENT.md for repeatable acceptance procedures.
+
+Version 0.5 acceptance on this pair also verified native one-to-one ATAK chat and
+DELIVERED receipts in both directions on a private channel, separate PLI and point
+round-trip displays, and readable timing menus. With the receiving ATAK stopped,
+a ten-second reporting interval held its next update behind a thirty-second ACK
+deadline. The old attempt remained visibly unconfirmed when the newest position
+was sent; Pause stopped further scheduled sends. No public-room chat was sent.
 
 JVM tests cover wire bounds, addressing, revision ordering, late/duplicate receipts,
 stale transitions, all interval values, bounded receipt scheduling, session resets
