@@ -42,7 +42,19 @@ class RelayPlugin(services: IServiceController) : IPlugin {
     private var service: IMeshService? = null
     private var interval = 0
     private var nextSend = 0L
-    private var ackWait = 120
+    private val ackWait = 300
+    private var radioAvailable = false
+    private var manualRequested = false
+    private val delivery = DeliveryQueue { random.nextInt(15_001).toLong() }
+    private val completion = linkedMapOf<String, (String?) -> Unit>()
+    private val radioPackets = java.util.concurrent.ConcurrentHashMap<Int, String>()
+    private var showDetails = false
+    private val preferences = host.getSharedPreferences("hardline.delivery", Context.MODE_PRIVATE)
+    @Volatile private var textTransport = preferences.getBoolean("textTransport", false)
+    private var radioStatus = "No radio submission"
+    private var privateReceived = 0
+    private var rejected = 0
+    private var lastRejection = "None"
     private var lastSend = -10_000L
     private var status = "Connecting to Meshtastic…"
     private var pane: Pane? = null
@@ -76,6 +88,10 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         check(s.connectionState() == "Connected") { "Radio disconnected. Reconnect in Meshtastic." }
         check(s.myNodeInfo?.firmwareVersion == "2.7.15.567b8ea") { "Radio firmware must be 2.7.15.567b8ea." }
         val config = LocalConfig.ADAPTER.decode(s.config)
+        check(config.lora?.tx_enabled == true) { "Radio transmission is disabled. Enable Transmit in Meshtastic." }
+        check(textTransport || config.device?.rebroadcast_mode != Config.DeviceConfig.RebroadcastMode.CORE_PORTNUMS_ONLY) {
+            "Radio filters private ATAK data. Enable Text transport here, or change CORE_PORTNUMS_ONLY in Meshtastic. Teammates must also send text if filtering stays enabled."
+        }
         check(config.lora?.hop_limit == 7) { "Expected 7 hops. Inspect Meshtastic; no settings changed." }
         return Snapshot(s.myId, ChannelSet.ADAPTER.decode(s.channelSet).settings, 7, requireNotNull(config.lora))
     }
@@ -87,9 +103,9 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             if (!active) return
             service = IMeshService.Stub.asInterface(binder); refresh()
         }
-        override fun onServiceDisconnected(name: ComponentName) { service = null; reset("Meshtastic service disconnected; automatic sending stopped.") }
-        override fun onBindingDied(name: ComponentName) { disconnect(); reset("Binding lost. Tap Reconnect.") }
-        override fun onNullBinding(name: ComponentName) { disconnect(); reset("Meshtastic binding unavailable.") }
+        override fun onServiceDisconnected(name: ComponentName) { service = null; radioAvailable = false; status = "Radio reconnecting · Reporting will resume on the same channel." }
+        override fun onBindingDied(name: ComponentName) { disconnect(); radioAvailable = false; status = "Reconnecting to Meshtastic…" }
+        override fun onNullBinding(name: ComponentName) { disconnect(); radioAvailable = false; status = "Meshtastic unavailable · Retrying connection…" }
     }
     private fun connect() {
         if (bound) return
@@ -102,25 +118,47 @@ class RelayPlugin(services: IServiceController) : IPlugin {
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (!active || session.selected == null) return
+            if (!active) return
+            if (intent.action == "com.geeksville.mesh.MESSAGE_STATUS") {
+                val id = intent.getIntExtra("com.geeksville.mesh.PacketId", 0)
+                if (radioPackets.containsKey(id)) {
+                    @Suppress("DEPRECATION") val value = intent.getParcelableExtra<org.meshtastic.core.model.MessageStatus>("com.geeksville.mesh.Status")
+                    radioStatus = "Radio status: $value (not a plugin receipt)"
+                    render()
+                }
+                return
+            }
+            if (session.selected == null) return
             try {
                 intent.setExtrasClassLoader(DataPacket::class.java.classLoader)
                 @Suppress("DEPRECATION") val packet = intent.getParcelableExtra<DataPacket>("com.geeksville.mesh.Payload") ?: return
-                if (packet.dataType != PliWire.PORT || packet.channel != session.selected || packet.viaMqtt) return
+                if (packet.dataType !in listOf(PliWire.PORT, 1) || packet.channel != session.selected || packet.viaMqtt) return
                 val from = packet.from?.lowercase(Locale.ROOT) ?: return
                 if (!from.matches(Regex("![0-9a-fA-F]{8}")) || from == session.snapshot?.node) return
-                val bytes = packet.bytes?.toByteArray() ?: return
+                val raw = packet.bytes?.toByteArray() ?: return
+                val bytes = if (packet.dataType == 1) TransportWire.decodeText(raw) ?: return else raw
+                privateReceived++
                 val now = SystemClock.elapsedRealtime()
-                if (ChatWire.isChat(bytes)) { chat.receive(from, bytes, now); return }
+                if (ChatWire.isChat(bytes)) {
+                    chat.receive(from, bytes, now)
+                    val m = ChatWire.decode(bytes)
+                    if (m is ChatWire.Receipt && m.recipient == session.snapshot?.node?.let(PointWire::nodeId)) delivery.acknowledge("chat:${m.id}", from)
+                    return
+                }
                 if (PointWire.isPointMessage(bytes)) {
                     val previous = points.last.status
                     points.receive(from, bytes, now)
+                    val m = PointWire.decode(bytes)
+                    if (m is PointWire.Receipt && m.recipient == session.snapshot?.node?.let(PointWire::nodeId)) delivery.acknowledge("point:${m.token}", from)
                     if (previous != PointSendState.Status.RECEIVED && points.last.status == PointSendState.Status.RECEIVED) lastPointProof = now
                     render(); return
                 }
                 val message = PliWire.decode(bytes)
                 when (message) {
-                    is PliWire.Receipt -> if (state.receipt(message.id, from, now)) status = "Peer $from confirmed processing PLI ${shortId(message.id)}."
+                    is PliWire.Receipt -> if (state.receipt(message.id, from, now)) {
+                        delivery.acknowledge("pli:${message.id}", from)
+                        status = "Teammate confirmed receiving your position."
+                    }
                     is PliWire.Position -> {
                         if (state.accept(from, message.pli, now, System.currentTimeMillis())) {
                             // Publish marker before issuing the application receipt.
@@ -128,11 +166,16 @@ class RelayPlugin(services: IServiceController) : IPlugin {
                             // Keep receipts on the same PSK channel as PLI. Direct-message
                             // radio routing can use a different encryption/channel path.
                             receipts.enqueue(from, message.pli, now, random.nextInt(2501).toLong() + 500)
+                        } else if (state.lastReception == PliState.Reception.DUPLICATE) {
+                            // Duplicate position must not refresh the marker, but can recover a lost receipt.
+                            if (markers.containsKey(from)) receipts.enqueue(from, message.pli, now, random.nextInt(2501).toLong() + 500)
+                        } else {
+                            rejected++; lastRejection = "Position ${state.lastReception.name.lowercase(Locale.ROOT)}"
                         }
                     }
                 }
                 render()
-            } catch (_: Exception) { /* Reject malformed/unrelated input without payload logging. */ }
+            } catch (_: Exception) { rejected++; lastRejection = "Unsupported or malformed private packet" }
         }
     }
 
@@ -142,7 +185,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         if (worker.isShutdown) worker = Executors.newSingleThreadExecutor()
         active = true
         ui?.addToolbarItem(button)
-        val filter = IntentFilter("com.geeksville.mesh.RECEIVED.PRIVATE_APP")
+        val filter = IntentFilter("com.geeksville.mesh.RECEIVED.PRIVATE_APP").apply { addAction("com.geeksville.mesh.MESSAGE_STATUS"); addAction("com.geeksville.mesh.RECEIVED.TEXT_MESSAGE_APP") }
         if (Build.VERSION.SDK_INT >= 33) host.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
         else @Suppress("DEPRECATION") host.registerReceiver(receiver, filter)
         registered = true
@@ -166,22 +209,27 @@ class RelayPlugin(services: IServiceController) : IPlugin {
     }
     private fun clearPeers() {
         markers.values.forEach { map.rootGroup.removeItem(it) }
-        markers.clear(); state.clear(); receipts.clear(); lastPointProof = -1L
+        markers.clear(); state.clear(); receipts.clear(); delivery.clear(); completion.clear(); radioPackets.clear(); manualRequested = false; lastPointProof = -1L
         points.resetContacts()
+        privateReceived = 0; rejected = 0; lastRejection = "None"; radioStatus = "No radio submission"
         chat.reset()
     }
     private fun reset(message: String) {
-        session.reset(); interval = 0; clearPeers()
+        session.reset(); radioAvailable = false; interval = 0; clearPeers()
         status = message; rebuildChannels(); render()
     }
     private val tick = object : Runnable {
         override fun run() {
             if (!active) return
             val now = SystemClock.elapsedRealtime()
-            if (!session.busy && now - lastRefresh >= 5000) { lastRefresh = now; refresh() }
+            if (!session.busy && now - lastRefresh >= 5000) {
+                lastRefresh = now
+                if (service == null) { if (bound) disconnect(); connect() } else refresh()
+            }
             state.waiting(now, ackWait * 1000L)
-            if (interval > 0 && now >= nextSend && !session.busy) sendPli()
+            if ((manualRequested || interval > 0 && now >= nextSend) && radioAvailable && !session.busy) sendPli()
             if (session.selected != null && !session.busy) receipts.poll(now)?.let { transmit(PliWire.ack(it), DataPacket.ID_BROADCAST, null) }
+            if (radioAvailable && !profileSwitching && catalogIssue == null && session.selected != null && !session.busy && session.queued == 0) delivery.poll(now)?.let(::sendFrame)
             state.expire(now); updateMarkers(now); render()
             handler.postDelayed(this, 1000)
         }
@@ -195,7 +243,8 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             handler.post {
                 if (!active || !session.finishRefresh(epoch)) return@post
                 result.onSuccess { current ->
-                    val newProfiles = catalog.getOrNull()?.entries.orEmpty()
+                    radioAvailable = true
+                    val newProfiles = catalog.getOrNull()?.entries ?: profiles
                     profileSwitching = catalog.getOrNull()?.switching == true
                     catalogIssue = if (catalog.isFailure) "Open Hardline Relay to reconnect saved channels. Sending paused." else null
                     val profilesChanged = profiles != newProfiles
@@ -203,18 +252,22 @@ class RelayPlugin(services: IServiceController) : IPlugin {
                     val old = session.snapshot
                     if (old != null && old != current) reset("Radio/channel changed. Select channel again; automatic sending stopped.")
                     val changed = session.observe(current)
+                    radioAvailable = true
                     if (changed || profilesChanged) {
                         status = "Radio connected (${current.node}), 7 hops. Select a private channel."
                         rebuildChannels()
                     }
-                    if (profileSwitching || catalogIssue != null) {
+                    if (profileSwitching) {
                         session.select(null); interval = 0; clearPeers()
                         status = catalogIssue ?: "Radio activation in progress or unverified. Open Relay for status."
                         rebuildChannels()
                     } else profiles.firstOrNull { it.activation.isNotEmpty() && it.activation != lastActivation && matchesActive(it) }?.let { entry ->
                         lastActivation = entry.activation; chooseChannel(entry.index)
                     }
-                }.onFailure { reset(it.message ?: "Radio unavailable.") }
+                }.onFailure {
+                    radioAvailable = false
+                    status = (it.message ?: "Radio unavailable.") + " · Waiting to reconnect; last-known contacts retained."
+                }
                 render()
             }
         }
@@ -237,56 +290,81 @@ class RelayPlugin(services: IServiceController) : IPlugin {
     private fun sendPli() {
         if (session.selected == null) { status = "Select a private channel first."; return }
         val now = SystemClock.elapsedRealtime()
-        if (session.busy || now - lastSend < 5000) return
+        if (session.busy || !radioAvailable || profileSwitching || catalogIssue != null || now - lastSend < 5000) { manualRequested = true; return }
+        manualRequested = false
         if (state.waiting(now, ackWait * 1000L) != null) {
             status = "Previous PLI is awaiting a receipt. Wait for confirmation or the ACK deadline before sending again."
             render(); return
         }
         try {
             val (point, fix) = positionFix()
-            var id = random.nextLong(); while (id == 0L) id = random.nextLong()
-            val name = map.deviceCallsign.take(20).ifBlank { "Relay" }
+            var id = random.nextInt().toLong() and 0xffffffffL; while (id == 0L) id = random.nextInt().toLong() and 0xffffffffL
+            var name = map.deviceCallsign.ifBlank { "Relay" }
+            while (name.toByteArray(Charsets.UTF_8).size > 40) name = name.substring(0, name.offsetByCodePoints(name.length, -1))
             val pli = Pli(id, fix.time, point.latitude, point.longitude, interval, name)
             lastSend = now
             nextSend = now + interval * 1000L
             positionIssue = null
-            transmit(PliWire.encode(pli), DataPacket.ID_BROADCAST, id)
+            transmit(PliWire.compact(pli), DataPacket.ID_BROADCAST, id)
         } catch (e: Exception) { positionIssue = e.message ?: "No fresh GPS fix; PLI paused."; status = positionIssue!!; render() }
     }
     private fun transmit(bytes: ByteArray, destination: String, pliId: Long?, done: (String?) -> Unit = {}) {
-        val s = service
-        val before = session.snapshot
-        val index = session.selected
-        if (!active || s == null || before == null || index == null) {
-            done("Radio/channel unavailable; point not submitted."); return
+        if (!active || session.selected == null || session.snapshot == null) { done("Choose a connected channel."); return }
+        if (textTransport && bytes.size > TransportWire.MAX_BINARY) {
+            done("Text transport supports a shorter chat. Use at most 107 UTF-8 text bytes with a 24-byte callsign; no message was sent.")
+            return
         }
-        val expected = before.channels.getOrNull(index)
-        if (expected == null) { done("Channel unavailable; point not submitted."); return }
-        val epoch = session.beginTransmit()
-        if (epoch == null) {
-            status = "Transmit queue full; packet not submitted."; done(status); return
+        val now = SystemClock.elapsedRealtime()
+        var recipient: String? = null
+        var receipt = false
+        val key = when {
+            pliId != null -> "pli:$pliId"
+            ChatWire.isChat(bytes) -> when (val m = ChatWire.decode(bytes)) {
+                is ChatWire.Text -> { recipient = "!" + m.recipient.toString(16).padStart(8, '0'); "chat:${m.id}" }
+                is ChatWire.Receipt -> { receipt = true; "chat-ack:${m.recipient}:${m.id}" }
+            }
+            PointWire.isPointMessage(bytes) -> when (val m = PointWire.decode(bytes)) {
+                is PointWire.Point -> { recipient = "!" + m.point.recipient.toString(16).padStart(8, '0'); "point:${m.point.token}" }
+                is PointWire.Receipt -> { receipt = true; "point-ack:${m.recipient}:${m.token}" }
+            }
+            else -> { receipt = true; "pli-ack:${(PliWire.decode(bytes) as PliWire.Receipt).id}" }
         }
-        // Register before send: a fast receipt may arrive before the worker completion callback.
-        if (pliId != null) state.sent(pliId, SystemClock.elapsedRealtime())
+        check(destination == DataPacket.ID_BROADCAST)
+        if (!delivery.offer(key, bytes, recipient, now, receipt)) { done("Radio outbox full. Wait for pending sends."); return }
+        if (pliId != null) state.sent(pliId, now)
+        completion[key] = done
+        while (completion.size > 36) completion.remove(completion.keys.first())
+        status = "Queued · Delivery recovery is automatic."
+    }
+    private fun sendFrame(frame: DeliveryQueue.Frame) {
+        val s = service ?: return
+        val before = session.snapshot ?: return
+        val index = session.selected ?: return
+        val epoch = session.beginTransmit() ?: return
+        val useText = textTransport
         worker.execute {
+            var packetId = 0
             val result = runCatching {
                 val current = read(s)
-                check(!ProfileCatalog.read(host).switching) { "Radio activation is pending verification in Relay. Sending paused." }
-                check(current == before && privateChannel(expected)) { "Radio/channel changed; packet not submitted." }
-                check(active && epoch == session.generation) { "Session changed; packet not submitted." }
-                s.send(DataPacket(to = destination, bytes = bytes.toByteString(), dataType = PliWire.PORT,
-                    channel = index, hopLimit = current.hops, wantAck = false))
+                check(!ProfileCatalog.read(host).switching) { "Channel activation is pending verification." }
+                check(current == before && privateChannel(current.channels[index])) { "Radio/channel changed." }
+                check(active && epoch == session.generation) { "Session changed." }
+                packetId = s.packetId
+                radioPackets[packetId] = frame.key
+                val bytes = if (useText) TransportWire.text(frame.bytes) else frame.bytes
+                s.send(DataPacket(to = DataPacket.ID_BROADCAST, bytes = bytes.toByteString(), dataType = if (useText) 1 else PliWire.PORT,
+                    id = packetId, channel = index, hopLimit = current.hops, wantAck = !frame.receipt))
             }
             handler.post {
                 if (!active || !session.finishTransmit(epoch)) return@post
-                result.onSuccess {
-                    if (pliId != null && state.pending[pliId]?.receipts?.isEmpty() == true)
-                        status = "PLI ${shortId(pliId)} submitted; awaiting plugin receipt."
-                    done(null)
-                }.onFailure {
-                    if (pliId != null) state.failed(pliId, it.message ?: "Radio submission failed.")
-                    status = it.message ?: "Packet submission failed."; interval = 0; done(status)
+                if (packetId != 0) {
+                    radioPackets[packetId] = frame.key
+                    while (radioPackets.size > 64) radioPackets.remove(radioPackets.keys.first())
                 }
+                val error = result.exceptionOrNull()?.message
+                if (error == null) completion.remove(frame.key)?.invoke(null)
+                radioStatus = if (error == null) "Submitted via ${if (useText) "text" else "private data"} · attempt ${frame.attempt}" else "Submission error · $error"
+                status = if (error == null) "Waiting for teammate confirmation · Recovery is automatic." else "$error · Recovery pending."
                 render()
             }
         }
@@ -378,26 +456,37 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             val reporting = column(); choices.addView(reporting, LinearLayout.LayoutParams(-1, -2))
             text(channels, "CHANNEL", 11f, muted)
             channelButtons = column(); channels.addView(channelButtons)
+            val fallback = Switch(host).apply {
+                text = "Text transport"; setTextColor(ink); isChecked = textTransport
+                setOnCheckedChangeListener { toggle, enabled ->
+                    if (enabled && !delivery.fits(TransportWire.MAX_BINARY)) {
+                        toggle.isChecked = false
+                        status = "A long chat is pending. Let it finish before enabling text transport."
+                    } else {
+                        textTransport = enabled
+                        preferences.edit().putBoolean("textTransport", enabled).apply()
+                        status = if (enabled) "Text transport enabled for every outbound packet, including receipts." else "Compact private-data transport enabled."
+                    }
+                    render()
+                }
+            }
+            reporting.addView(fallback)
+            text(reporting, "Higher-priority channel text · More airtime. Teammates receive either mode.", 12f, muted)
             text(reporting, "REPORTING", 11f, muted)
             intervalSpinner = spinner(reporting, listOf("Off / Manual", "10 seconds", "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes"),
                 PliWire.intervals.indexOf(interval)) { selected ->
                 val seconds = PliWire.intervals[selected]
                 if (seconds == interval) return@spinner
                 if (seconds == 0 || session.selected != null) {
-                    interval = seconds; nextSend = SystemClock.elapsedRealtime() + seconds * 1000L + random.nextInt(1000)
+                    interval = seconds; if (seconds == 0) { delivery.cancelPli(); state.latest?.let { state.failed(it.id, "Position sending paused") } }; nextSend = SystemClock.elapsedRealtime() + seconds * 1000L + random.nextInt(1000)
                     status = if (seconds == 0) "Automatic PLI paused." else "Reporting every ${seconds}s."
                 } else status = "Select a connected channel first."
                 render()
             }
-            text(reporting, "PLI ACK WAIT / RETRY", 11f, muted)
-            val waits = listOf(30, 60, 120, 180, 300)
-            spinner(reporting, listOf("30 seconds", "1 minute", "2 minutes", "3 minutes", "5 minutes"), waits.indexOf(ackWait)) {
-                ackWait = waits[it]; render()
-            }
-            text(reporting, "One PLI at a time. Overdue updates wait for a peer receipt or this deadline, then send the newest position.", 12f, muted)
+            text(reporting, "Delivery recovery is automatic. Positions remain last-known until a fresh update arrives.", 12f, muted)
             val actions = LinearLayout(host); control.addView(actions)
             addButton(actions, "Send PLI now") { sendPli() }
-            addButton(actions, "Pause PLI") { interval = 0; status = "Automatic PLI paused."; render() }
+            addButton(actions, "Pause PLI") { interval = 0; manualRequested = false; delivery.cancelPli(); state.latest?.let { state.failed(it.id, "Position sending paused") }; status = "Position sending paused."; render() }
             addButton(actions, "Channels") { openProfiles() }
             val summary = card(layout)
             text(summary, "MESH STATUS", 11f, accent)
@@ -407,9 +496,10 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             myPliText = text(summary, "", 13f)
             pointText = text(summary, "", 13f)
             chatText = text(summary, "", 13f)
-            text(summary, "Chat from ATAK's normal contact conversation · 160 UTF-8 bytes per message · Private Relay channel only", 12f, muted)
+            text(summary, "Chat from ATAK's normal contact conversation · 160 UTF-8 bytes normally; use 107 or fewer with text transport · Private channel only", 12f, muted)
             retryButton = addButton(summary, "Retry last point") { points.retry() }
             peerText = text(summary, "", 13f)
+            addButton(summary, "Connection details") { showDetails = !showDetails; render() }
             diagnostics = text(summary, "", 13f, muted)
             addButton(summary, "Reconnect / refresh") { if (service == null) { disconnect(); connect() }; refresh() }
             pane = PaneBuilder(ScrollView(host).apply { isFillViewport = true; setBackgroundColor(android.graphics.Color.rgb(13,21,27)); addView(layout) })
@@ -506,7 +596,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             (state.lastConfirmation >= 0 && now - state.lastConfirmation < maxOf(60_000L, interval * 3000L)) ||
             (lastPointProof >= 0 && now - lastPointProof < 60_000L) ||
             (chat.lastProof >= 0 && now - chat.lastProof < 60_000L)
-        val health = if (profileSwitching || catalogIssue != null) MeshHealth.State.WAITING else MeshHealth.assess(session.snapshot != null && service != null, session.selected != null,
+        val health = if (profileSwitching || catalogIssue != null) MeshHealth.State.WAITING else MeshHealth.assess(radioAvailable && service != null, session.selected != null,
             recent, interval > 0 && positionIssue != null)
         indicator?.update(health)
         healthText?.text = when (health) {
@@ -516,22 +606,24 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             MeshHealth.State.CONFIRMED -> "Recent mesh contact"
         }
         val name = session.selected?.let { session.snapshot?.channels?.getOrNull(it)?.name } ?: "None"
-        statusText?.text = "$name · ${if (interval == 0) "PLI off" else "PLI every ${interval}s"}"
+        statusText?.text = "$name · ${if (textTransport) "Text transport" else "Private data"} · ${if (interval == 0) "PLI off" else "PLI every ${interval}s"}"
         val sent = state.latest
         val waiting = state.waiting(now, ackWait * 1000L)
         myPliText?.text = buildString {
             append("My PLI · ")
             append(if (sent == null) "No report this session" else pliAttempt(sent, now))
             if (waiting != null) {
-                append("\nACK deadline in ${age(ackWait * 1000L - (now - waiting.at))}")
+                append("\nTrying automatically · ${age(ackWait * 1000L - (now - waiting.at))} remaining")
                 if (interval > 0 && now >= nextSend) append(" · Next update held")
             }
-            state.pending.values.toList().takeLast(4).filter { it.id != sent?.id }.reversed().forEach {
+            state.pending.values.toList().takeLast(if (showDetails) 4 else 0).filter { it.id != sent?.id }.reversed().forEach {
                 append("\nPrevious ${shortId(it.id)} · ${pliAttempt(it, now)}")
             }
             append("\nLast confirmed · ").append(if (state.lastConfirmation >= 0) "${age(now - state.lastConfirmation)} ago" else "None this session")
-            append("\n").append(roundTripText(state.roundTrips))
-            append("\n${state.unanswered} unanswered in retained attempts · Silence does not prove loss")
+            if (showDetails) {
+                append("\n").append(roundTripText(state.roundTrips))
+                append("\n${state.unanswered} unanswered in retained attempts · Silence does not prove loss")
+            }
         }
         peerText?.text = buildString {
             val overdue = state.peers.values.count { it.stale(now) }
@@ -542,10 +634,14 @@ class RelayPlugin(services: IServiceController) : IPlugin {
         }
         val problem = health in listOf(MeshHealth.State.FAULT, MeshHealth.State.WAITING) ||
             p.status in listOf(PointSendState.Status.FAILED, PointSendState.Status.UNCONFIRMED) || positionIssue != null || sent?.failure != null || catalogIssue != null || profileSwitching
-        diagnostics?.visibility = if (problem) android.view.View.VISIBLE else android.view.View.GONE
+        diagnostics?.visibility = if (problem || showDetails) android.view.View.VISIBLE else android.view.View.GONE
         diagnostics?.text = buildString {
             if (positionIssue != null) append(positionIssue).append("\n")
             append(status)
+            append("\n$radioStatus")
+            if (textTransport) append("\nText transport: HLR1 frames appear in Meshtastic conversations. Each phone chooses its own sending mode, including receipts.")
+            append("\nOutbox ${delivery.pending} · ${delivery.submitted} attempts / ${delivery.retries} retries / ${delivery.bytesSubmitted} binary bytes")
+            append("\n${delivery.confirmed} confirmed / ${delivery.expired} expired · $privateReceived private RX / $rejected rejected ($lastRejection)")
             sent?.failure?.let { append("\n").append(it) }
             if (p.status in listOf(PointSendState.Status.FAILED, PointSendState.Status.UNCONFIRMED)) append("\n").append(p.detail)
             if (health == MeshHealth.State.WAITING && !recent && !profileSwitching && catalogIssue == null) append("\nNo recent peer evidence. Check teammates are on the same channel/frequency and keep radios clear of obstructions.")
