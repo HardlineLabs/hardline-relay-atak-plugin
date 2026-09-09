@@ -8,7 +8,7 @@ positions must not look like proof that a peer is still actively sending.
 ## Operation
 
 The optional :atak-plugin module targets ATAK CIV API 5.6.0 using the local
-5.6.0.23 SDK development host. Version 0.5.0 (5) binds independently to
+5.6.0.23 SDK development host. Version 0.6.0 (6) binds independently to
 Meshtastic Android 2.7.13 IMeshService using the ATAK host Context. Meshtastic
 owns BLE. The plugin reads channel configuration transiently (including keys for
 change detection), never persists it, and never writes radio configuration.
@@ -20,22 +20,31 @@ requiring activation opens Relay for passphrase entry and verified configuration
 the plugin itself never writes radio settings. Sending is paused during activation
 and remains Off afterward. Installed keys alone do not establish the profile's RF.
 
-Reporting choices are Off / Manual, 10s, 30s, 1m, 2m, 5m and 10m. Short intervals
-consume more airtime; start with a slower cadence for larger meshes. Send PLI now
-sends a single report when no previous report is waiting. Closing the pane leaves an enabled timer running; Pause PLI
-stops it. Plugin unload, detected disconnection or radio/channel changes stop
-automatic sending and reset the session. There are no catch-up bursts.
+Reporting choices remain Off / Manual, 10s, 30s, 1m, 2m, 5m and 10m. There is no
+operator retry-timer menu: recovery is automatic for both manual and scheduled PLI.
+Pause cancels pending PLI submissions. Closing the pane leaves enabled reporting
+running. Brief connection interruptions retain last-known contacts and recover on
+the same verified radio/channel; a changed configuration or unload resets the session.
+No catch-up burst is sent. Connection details are expandable; firmware submission
+and peer processing confirmation remain distinct.
 
-Channel, interval and ACK-wait menus use full-width rows with wrapping labels.
-PLI ACK wait / retry defaults to two minutes, with 30s/1m/2m/3m/5m choices.
-Only one attempt waits at a time. If a scheduled update is overdue, a matching receipt
-releases it; otherwise the deadline marks the old attempt unconfirmed and releases
-the newest GPS position under a new token. Previous attempts stay visible and late
-ACKs cannot clear a newer wait. Silence cannot distinguish packet loss from a lost
-receipt or delay. The pane shows wait age, remaining deadline, held updates,
-last-confirmed age, unanswered retained attempts, and independent PLI/point average,
-latest and longest round trips with sample counts. Each keeps the last 32 matched
-attempts in the current radio session; PLI uses the first peer receipt per attempt.
+The [0.6 PLI/recovery contract](../protocol/pli-v2.md) owns exact packet fields,
+timing, freshness, limits and compatibility. Upgrade both plugins to 0.6. The
+receiver still accepts legacy PLI. New PLI is compact and standalone; chat/point
+formats remain unchanged. Radio LongFast/hop settings are preserved.
+
+## Text transport
+
+Enable **Text transport** when private data is struggling on a busy mesh. Every
+outbound plugin packet then uses framed channel text, including PLI, points, chat
+and receipts. All updated teammates receive either transport without changing
+their own toggle. Each device controls how it sends. The choice is remembered.
+
+Text gets Meshtastic's higher text queue priority, but Base64 adds overhead and
+HLR1 messages appear in the channel conversation. It does not reserve airtime.
+Use chat bodies of 107 UTF-8 bytes or fewer in this mode; larger packets fail
+visibly rather than being fragmented. Positions/points/receipts already fit.
+The current wire contract owns exact limits and mixed-mode behavior.
 
 ## ATAK chat
 
@@ -48,9 +57,9 @@ discovers contacts; received chats can establish reply contacts too.
 
 Messages are limited to 160 UTF-8 bytes (fewer characters with emoji/non-ASCII).
 Oversized messages produce an error and are not truncated or split. There is no
-public-room forwarding, group fan-out, attachment transport, automatic resend or
+public-room forwarding, group fan-out, attachment transport or
 TAK-server bridge. Other members of the private channel can decrypt radio packets;
-only the addressed plugin imports the conversation. Both users require plugin 0.5.
+only the addressed plugin imports the conversation. Both users should use plugin 0.6.
 ATAK owns persistent conversation history; the plugin's pending delivery records
 reset when the radio session changes. See the [chat contract](../protocol/chat-v1.md).
 
@@ -64,13 +73,11 @@ or resolving activation/position reporting, and green after recent peer evidence
 Green is a recent communication observation, not guaranteed current reachability.
 TAK-server connectivity is separate. No Wi-Fi, mobile data or backend is required.
 
-The [PLI contract](../protocol/pli-v1.md) owns exact packet fields, freshness
+The [PLI contract](../protocol/pli-v2.md) owns exact packet fields, freshness
 thresholds, bounds and trust limitations. PLI uses ATAK's self position guarded by
 a recent matching phone GPS fix. Received PLI creates/updates plugin-owned map
 markers and a peer list. Fix time and local receipt age are separate. Stale entries
-are last-known, not an online guarantee. Local disconnection/channel reset currently
-removes entries rather than retaining an offline history; this differs from a peer
-simply ceasing to send while the receiver remains connected.
+are last-known, not an online guarantee. Brief disconnection retains last-known entries; explicit channel/configuration change or unload clears the session. Positions are not persisted across ATAK restarts.
 
 Receipts correlate to individual packets and should follow the receiver's marker
 update. Submission, radio delivery and application processing are different states.
@@ -93,7 +100,7 @@ read it; recipient selection is not recipient-only encryption. Supported basic
 spot and ground markers carry coordinates, a name of up to 24 UTF-8 bytes, symbol
 and color. Unsupported selections and long names fail visibly rather than silently
 changing the point. Altitude, remarks, files, shapes/routes and custom icons are
-outside this first compact format. No automatic resend or periodic point sending. A failed/unconfirmed attempt offers
+outside this first compact format. Bounded automatic recovery uses the shared outbox; no periodic point sending. A failed/unconfirmed attempt offers
 a manual Retry button, reusing the source marker only while that marker and contact
 remain available in the same session.
 

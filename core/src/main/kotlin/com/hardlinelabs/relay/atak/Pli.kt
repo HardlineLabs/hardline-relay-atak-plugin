@@ -1,5 +1,6 @@
 package com.hardlinelabs.relay.atak
 
+import kotlin.math.roundToInt
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 
@@ -18,8 +19,17 @@ object PliWire {
         val name = p.callsign.toByteArray(Charsets.UTF_8)
         require(name.size in 1..40 && p.callsign.none { it.isISOControl() })
         return ByteBuffer.allocate(35 + name.size).putInt(MAGIC).put(1).putLong(p.id)
-            .putLong(p.fixTime).putInt((p.lat * 1e7).toInt()).putInt((p.lon * 1e7).toInt())
+            .putLong(p.fixTime).putInt((p.lat * 1e7).roundToInt()).putInt((p.lon * 1e7).roundToInt())
             .putInt(p.interval).putShort(name.size.toShort()).put(name).array()
+    }
+    /** V2: absolute position, uint32 token/seconds, interval index, bounded UTF-8 name. */
+    fun compact(p: Pli): ByteArray {
+        encode(p) // Same coordinate/name validation as v1.
+        require(p.id in 1..0xffffffffL && p.fixTime / 1000 in 1..0xffffffffL)
+        val name = p.callsign.toByteArray(Charsets.UTF_8)
+        return ByteBuffer.allocate(22 + name.size).putInt(MAGIC).put(7).putInt(p.id.toInt())
+            .putInt((p.fixTime / 1000).toInt()).putInt((p.lat * 1e7).roundToInt()).putInt((p.lon * 1e7).roundToInt())
+            .put(intervals.indexOf(p.interval).toByte()).put(name).array()
     }
     fun ack(id: Long): ByteArray {
         require(id != 0L)
@@ -33,6 +43,15 @@ object PliWire {
         val b = ByteBuffer.wrap(bytes)
         require(b.int == MAGIC)
         val type = b.get().toInt()
+        if (type == 7) {
+            require(bytes.size in 23..62)
+            val id = b.int.toLong() and 0xffffffffL
+            val time = (b.int.toLong() and 0xffffffffL) * 1000
+            val lat = b.int / 1e7; val lon = b.int / 1e7
+            val interval = intervals.getOrNull(b.get().toInt()) ?: error("Invalid interval")
+            val name = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).decode(b).toString()
+            return Position(Pli(id, time, lat, lon, interval, name).also { compact(it) })
+        }
         val id = b.long
         require(id != 0L)
         if (type == 2) { require(!b.hasRemaining()); return Receipt(id) }
@@ -54,7 +73,7 @@ object PliWire {
 class PliState {
     data class Peer(val pli: Pli, val receivedAt: Long, val receivedWall: Long) {
         fun age(now: Long) = ((now - receivedAt).coerceAtLeast(0) / 1000)
-        fun stale(now: Long) = now - receivedAt >= maxOf(60_000L, pli.interval * 3_000L)
+        fun stale(now: Long) = now - receivedAt + (receivedWall - pli.fixTime).coerceAtLeast(0) >= maxOf(60_000L, pli.interval * 3_000L)
     }
     data class Sent(val id: Long, val at: Long, val receipts: MutableSet<String> = linkedSetOf(),
                     var failure: String? = null, var deadlineReached: Boolean = false)
@@ -92,16 +111,20 @@ class PliState {
         } }
     }
     fun failed(id: Long, reason: String) { pending[id]?.takeIf { it.receipts.isEmpty() }?.failure = reason }
+    enum class Reception { ACCEPTED, DUPLICATE, OLDER, EXPIRED, FUTURE }
+    var lastReception = Reception.ACCEPTED; private set
     fun accept(from: String, p: Pli, now: Long, wall: Long): Boolean {
         expire(now)
         val key = "$from:${p.id}"
-        if (seen.containsKey(key)) return false
-        seen[key] = now
-        while (seen.size > 256) seen.remove(seen.keys.first())
+        lastReception = Reception.ACCEPTED
+        if (seen.containsKey(key)) { lastReception = Reception.DUPLICATE; return false }
         val previous = peers[from]
         // A delayed older fix must not move a marker backwards or refresh its age.
-        if (previous != null && p.fixTime < previous.pli.fixTime) return false
-        if (p.fixTime > wall + 30_000 || wall - p.fixTime > 120_000) return false
+        if (p.fixTime > wall + 30_000) { lastReception = Reception.FUTURE; return false }
+        if (wall - p.fixTime > 900_000) { lastReception = Reception.EXPIRED; return false }
+        if (previous != null && p.fixTime < previous.pli.fixTime) { lastReception = Reception.OLDER; return false }
+        seen[key] = now
+        while (seen.size > 256) seen.remove(seen.keys.first())
         if (!peers.containsKey(from) && peers.size >= 32) peers.remove(peers.keys.first())
         peers[from] = Peer(p, now, wall)
         return true
