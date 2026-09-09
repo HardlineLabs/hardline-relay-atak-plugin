@@ -120,7 +120,7 @@ ATAK imports. A plugin restart clears the last-send indicator and Relay contacts
 
 ## Evidence boundary
 
-The supported lab uses two Moto G Play 2024 / Android 14 phones, Heltec V3 radios,
+Earlier-version acceptance used two Moto G Play 2024 / Android 14 phones, Heltec V3 radios,
 Meshtastic Android 2.7.13 and firmware 2.7.15.567b8ea, US LONG_FAST / seven hops.
 Manual PLI, same-channel processing receipts and native point sends/receipts have
 passed both directions. Protected optical provisioning, wrong-passphrase rejection,
@@ -151,3 +151,24 @@ signing compatibility or operation on every phone/region. Third-recipient filter
 has deterministic tests; a three-radio field exercise remains separate. No ordinary
 TAK-server traffic is bridged to LoRa, and live TAK-server coexistence has not been
 certified. Do not install another Meshtastic ATAK bridge automatically.
+
+
+Version 0.6 acceptance on the same pinned two-phone/radio setup verified compact
+PLI, mixed sending modes (text position/private receipt), native ATAK chat and a
+native point over text transport. The point received its recipient's application
+receipt in 12.2 seconds in one quiet-room trial. Closing the receiving ATAK for the
+first manual PLI and reopening it before the retry recovered without a second tap,
+in both private and text modes; the outbox recorded one retry and confirmation.
+The delayed position remained overdue. Bluetooth stayed connected; these runs test
+missing application reception, not a forced BLE outage or congested RF.
+
+The Relay companion's bounded RF comparison received all 16 samples across text,
+unreliable private, reliable private and smaller reliable private data. Receiver
+means were 1,188 and 2,427 ms (maximum 2,957 ms); only two samples per mode/direction.
+This small quiet-room sample does not establish comparative congestion performance.
+
+A deterministic 10,000-trial independent application-loss experiment at 50% loss
+received 50.36% of first submissions versus 87.28% with bounded recovery; 58.52%
+were confirmed when receipts suffered the same loss. It averaged 2.3046 data
+submissions per trial. Firmware retries and correlated interference are excluded.
+These measured software results explain the tradeoff, not a city-mesh success rate.

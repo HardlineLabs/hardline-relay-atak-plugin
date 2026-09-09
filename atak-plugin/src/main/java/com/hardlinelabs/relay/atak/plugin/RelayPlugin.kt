@@ -640,7 +640,7 @@ class RelayPlugin(services: IServiceController) : IPlugin {
             append(status)
             append("\n$radioStatus")
             if (textTransport) append("\nText transport: HLR1 frames appear in Meshtastic conversations. Each phone chooses its own sending mode, including receipts.")
-            append("\nOutbox ${delivery.pending} · ${delivery.submitted} attempts / ${delivery.retries} retries / ${delivery.bytesSubmitted} payload bytes")
+            append("\nOutbox ${delivery.pending} · ${delivery.submitted} attempts / ${delivery.retries} retries / ${delivery.bytesSubmitted} binary bytes")
             append("\n${delivery.confirmed} confirmed / ${delivery.expired} expired · $privateReceived private RX / $rejected rejected ($lastRejection)")
             sent?.failure?.let { append("\n").append(it) }
             if (p.status in listOf(PointSendState.Status.FAILED, PointSendState.Status.UNCONFIRMED)) append("\n").append(p.detail)
