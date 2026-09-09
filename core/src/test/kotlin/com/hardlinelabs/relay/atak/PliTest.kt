@@ -51,7 +51,7 @@ class PliTest {
     }
     @Test fun lateAndFutureFixesRejected() {
         val s = PliState()
-        assertFalse(s.accept("peer", p, 0, 300_000))
+        assertFalse(s.accept("peer", p, 0, 1_100_000))
         assertFalse(s.accept("peer", p.copy(id = 43), 0, 1))
     }
     @Test fun olderFixCannotMoveMarkerBackwards() {

@@ -9,8 +9,9 @@ picker with contacts learned from received PLI. The pane shows the latest point
 receipt, your latest PLI and each contact's position age. A small colored **HL**
 badge opens the pane and shows recent mesh evidence independently of TAK-server
 connectivity. Troubleshooting details appear when something needs attention.
-PLI holds overdue updates while awaiting acknowledgment; adjustable ACK wait and
-separate PLI/point round-trip statistics make slow returns visible. Chat uses ATAK's
+Compact PLI, bounded retries and peer receipts make missed updates recoverable.
+An optional Text transport switch uses Meshtastic text priority; every updated
+plugin receives both formats. Connection details expose retries and slow returns. Chat uses ATAK's
 normal one-to-one Relay contact conversation on the selected private channel.
 
 - [Behavior, packet sizes and limits](docs/PRODUCT.md)

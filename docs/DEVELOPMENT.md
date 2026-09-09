@@ -91,12 +91,14 @@ separate workflow.
 
 ## Compact point acceptance
 
-For 0.5, also verify PLI interval/ACK wait independently: keep one receiving plugin
-closed, set a short normal interval and a longer ACK deadline, and require exactly
-one waiting attempt with held updates until the deadline. The retry must have a
-new token and current GPS fix; restore the receiver and require a matched receipt.
-Leave both senders Off afterward. JVM tests cover matching late receipts to old
-attempts without releasing a newer wait, duplicate exclusion and separate RTT means.
+For 0.6, use the fixed automatic delivery recovery: send a manual PLI with the
+receiving plugin stopped, restore it before the retry, and require a matched
+application receipt without another Send tap. Repeat with Text transport enabled,
+then with only one peer using text. Both updated receivers must decode either
+transport; receipts follow each sender's toggle. Check duplicate positions do not
+renew marker freshness. Pause must prevent further PLI submissions, including queued
+retries. Brief service loss must pause and recover on identical radio/channel settings.
+A changed radio/configuration must clear queued traffic. Leave reporting Off.
 
 For chat, receive PLI to discover each Relay contact, open that contact's native
 ATAK conversation, and send one short message each way on the selected private
@@ -105,7 +107,7 @@ All Chat Rooms/public channels. Check oversized UTF-8 text is rejected visibly.
 No local submission or phone-to-phone TAK network delivery substitutes for a
 matching Relay receipt. Check that normal non-Relay contacts are not intercepted.
 
-Use 0.5.0 (5) on both SDK hosts. Verify the installed hash recorded in the
+Use 0.6.0 (6) on both SDK hosts. Verify the installed hash recorded in the
 workstation inventory; a version name alone is not sufficient during development.
 
 1. Keep both automatic PLI modes Off and select the existing private channel.
@@ -121,7 +123,7 @@ workstation inventory; a version name alone is not sufficient during development
    do not prove a third peer's behavior. JVM tests cover the filtering decision.
 5. With no receiving plugin, send once and require UNCONFIRMED after 60 seconds,
    never a claim of proven loss. Resume reception and explicitly resend if needed.
-   Do not use repeated automatic retries. Long names/unsupported selections must
+   The shared outbox bounds automatic recovery to three application submissions; do not add repeated manual sends during that window. Long names/unsupported selections must
    fail visibly. PLI traffic must not overwrite the last-point indicator.
 6. Reload/restart and reconnect separately. Contacts are rebuilt from fresh PLI;
    auto sending remains Off. Received points and last-point status are currently
@@ -172,3 +174,20 @@ Work from current origin/develop on feature/<name>. Validate and push coherent
 commits, then merge through develop. main is reserved for an authorized release.
 CI validates main, develop and feature branches. Source publication does not publish
 a production-signed APK or redistribute the ATAK SDK.
+
+## Repeatable loss and transport checks
+
+`tools/check.ps1` runs deterministic loss/duplicate/delay/expiration/bounds tests.
+DeliveryQueueTest includes seeded 10,000-trial runs at each of 0%, 30%, 50%, and 70%
+independent application packet loss. It reports delivery separately from confirmation
+and counts data submissions. These are synthetic losses, not an RF/city model:
+firmware retries, airtime, correlated interference and hidden transmitters are not
+simulated. Unit tests also cover burst loss, total outage, expired offline queues,
+compact/legacy decoding, text framing for all message families and maximum sizes.
+
+The Relay App's opt-in PrivateTransportAcceptanceTest compares actual private-channel
+text, unreliable private data, reliable private data and smaller reliable data on
+two phones. Both must have the same profile/key and an explicitly checked frequency
+slot; it sends only eight bounded samples per phone, with staggered timing. Ordinary
+instrumentation does not start this RF test. Product tests and all live checks must
+retain the distinction between application receipt and routing acknowledgment.
